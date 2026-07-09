@@ -1,0 +1,66 @@
+{
+  "matrix": {
+    "homeserver": "https://matrix.chenyun.org",
+    "user_id": "@hanyan:matrix.chenyun.org",
+    "password": "CHANGE_ME_OR_SET_HANYAN_MATRIX_PASSWORD_ENV",
+    "device_name": "HanyanChat"
+  },
+  "llm": {
+    "base_url": "http://localhost:11434",
+    "model": "qwen3:8b",
+    "temperature": 0.7,
+    "timeout": 60,
+    "api_key": ""
+  },
+  "tts": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:9100",
+    "endpoint": "/hanyan/stream",
+    "timeout": 30,
+    "engine": "gptsovits",
+    "max_files": 200,
+    "max_age_days": 7
+  },
+  "stt": {
+    "enabled": true,
+    "model": "mlx-community/whisper-large-v3-turbo",
+    "language": "zh"
+  },
+  "proactive": {
+    "interval_minutes": 30,
+    "quiet_start": "23:00",
+    "quiet_end": "07:00"
+  },
+  "memory": {
+    "max_entries": 50,
+    "storage_dir": "./data/memories",
+    "promote_threshold": 30,
+    "core_memory_max": 50,
+    "use_llm_summary": true
+  },
+  "character": {
+    "prompts_dir": "./prompts",
+    "default_character": "小月",
+    "user_map": {
+      "@friend:matrix.chenyun.org": "角色2"
+    }
+  },
+  "link_fetch": {
+    "enabled": true,
+    "timeout": 10,
+    "max_length": 2000,
+    "user_agent": "Mozilla/5.0 (compatible; HanyanChat/1.0)"
+  },
+  "commands": {
+    "enabled": true,
+    "prefix": "/"
+  },
+  "webui": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 5001,
+    "username": "admin",
+    "password": "CHANGE_ME_OR_SET_HANYAN_WEBUI_PASSWORD_ENV",
+    "secret_key": "CHANGE_ME_OR_SET_HANYAN_WEBUI_SECRET_ENV"
+  }
+}

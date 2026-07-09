@@ -1,0 +1,23 @@
+# Hanyan Chat 依赖
+
+# Matrix 通信层（必需）
+mautrix>=0.20.0,<0.22.0
+
+# STT：本地语音转文字（必需，仅支持 Apple Silicon Mac）
+# 如果部署在非 Apple Silicon 环境，把 config.json 的 stt.enabled 设为 false，
+# 不装这个包也能正常跑（只是不能处理语音消息）。
+mlx-whisper>=0.4.0
+
+# WebUI（可选：只有需要跑 `python webui.py` 时才需要）
+Flask>=2.3,<4.0
+
+# ── 有意不引入的依赖 ──────────────────────────────────────────────
+# requests / beautifulsoup4 / lxml：链接内容提取改用标准库 urllib + html.parser 实现，
+# 見 hanyan/links.py，保持依赖面最小。
+#
+# ── 系统依赖（不是 pip 包，需要单独安装）──────────────────────────
+# - Ollama（跑本地 qwen3:8b，或任意兼容 /api/chat 的服务）：https://ollama.com
+# - ffmpeg（TTS 输出 WAV→OGG 压缩需要，STT 处理非 wav 格式音频也依赖它解码）：
+#     macOS: brew install ffmpeg
+# - 一个 TTS 网关（SAES/GPT-SoVITS 或任意实现了 tts.endpoint 协议的服务），
+#   或者把 config.json 的 tts.enabled 设为 false 跳过语音回复
