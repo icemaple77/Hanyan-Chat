@@ -8,8 +8,10 @@ Hanyan Chat — Matrix 通信层（替代 KouriChat 的 wxauto）
 
 import asyncio
 import collections
+import json
 import logging
 import os
+import time
 import mimetypes
 from typing import Callable, Optional
 
@@ -38,6 +40,14 @@ _TOKEN_PATH = os.path.join(config.ROOT_DIR, "data", "access_token.txt")
 # 认证失效时 Matrix 返回的错误码/关键字（用于区分"需要重新登录"与"临时网络故障"）
 _AUTH_ERROR_MARKERS = ("M_UNKNOWN_TOKEN", "M_MISSING_TOKEN", "401")
 
+_SEEN_EVENTS_PATH = os.path.join(config.ROOT_DIR, "data", "seen_events.json")
+
+# 同一个发送者，短时间内发来内容完全相同的消息，大概率是客户端网络卡顿后的
+# 自动重发（重发时会生成新的 event_id，_mark_seen 按 event_id 去重完全拦不住，
+# 实测日志里出现过同一句话在同一秒内被当成 3 条不同事件、各自触发一次完整
+# LLM 回复的情况）。这里按"发送者+文字内容"做一层内容级去重兜底。
+_DUPLICATE_BODY_WINDOW_SECONDS = 4.0
+
 # 不是所有 mautrix-python 版本都在 EventType 上预置了 REACTION 常量，
 # 用 find() 兜底，保证 [tickle]/[tickle_self] 在任意版本下都不会因为
 # AttributeError 崩掉（此时会被 send_tickle 里的 try/except 捕获，退化为文字）。
@@ -59,9 +69,13 @@ class MatrixClient:
         # 已处理的事件 ID 去重：deque 保证有界 + FIFO 淘汰，set 用于 O(1) 查找。
         self._seen_events_order: collections.deque = collections.deque(maxlen=10000)
         self._seen_events: set = set()
+        self._seen_dirty = False  # 只在真的有新事件时才落盘，避免空闲时每次 sync 都无意义写文件
+        self._load_seen_events()
         # 用于 [tickle]/[recall] 等动作标记：记录每个房间最近一次收到/发出的消息事件。
         self._last_sent_event: dict = {}      # room_id -> event_id（bot 自己发的最后一条文本）
         self._last_received_event: dict = {}  # room_id -> event_id（用户发的最后一条消息）
+        # 内容级去重兜底：sender -> (body, monotonic_timestamp)。见 _DUPLICATE_BODY_WINDOW_SECONDS 注释。
+        self._recent_body_cache: dict = {}
         # 语音转文字回调：set_stt_callback() 注入，签名 (audio_bytes, mime_type) -> Optional[str]。
         # 放在这一层而不是上层 bot 逻辑里判断 msgtype，是因为"语音先转文字再走正常流程"
         # 本质上是传输层的预处理，转完之后 handler 完全不需要知道这条消息原本是语音。
@@ -169,7 +183,42 @@ class MatrixClient:
         self._logged_in = False
         logger.info("Disconnected")
 
-    # ── 去重 ─────────────────────────────────────────────────
+    # ── 去重（持久化） ──────────────────────────────────────────
+    #
+    # 之前的实现只在内存里去重，进程重启后这个集合是空的——如果 mautrix 的
+    # state store 没能可靠地记住 sync token，重启后可能会短暂重放最近的一批
+    # 事件。落盘这个去重集合作为额外一层保险。只在真的有新事件时才写文件
+    # （_seen_dirty 标记），而不是每次 sync 循环跑一圈就无条件写一次——
+    # 5 秒一次的短轮询空闲时也会跑很多圈，无条件写盘会变成持续的无意义 I/O。
+
+    def _load_seen_events(self):
+        """从文件加载已处理的事件 ID。"""
+        if not os.path.exists(_SEEN_EVENTS_PATH):
+            return
+        try:
+            with open(_SEEN_EVENTS_PATH) as f:
+                events = json.load(f)
+            self._seen_events = set(events)
+            self._seen_events_order = collections.deque(events, maxlen=10000)
+            logger.info("Loaded %d seen events from disk", len(self._seen_events))
+        except Exception as e:
+            logger.warning("Failed to load seen events: %s", e)
+
+    def _save_seen_events(self):
+        """将已处理的事件 ID 保存到文件（仅当有新增时才真正写盘）。"""
+        if not self._seen_dirty:
+            return
+        try:
+            os.makedirs(os.path.dirname(_SEEN_EVENTS_PATH), exist_ok=True)
+            tmp_path = _SEEN_EVENTS_PATH + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(list(self._seen_events), f)
+            os.replace(tmp_path, _SEEN_EVENTS_PATH)
+            self._seen_dirty = False
+        except Exception as e:
+            logger.debug("Failed to save seen events: %s", e)
+
+    # ── 去重（已处理事件检测） ──────────────────────────────────
 
     def _mark_seen(self, event_id: str) -> bool:
         """去重。返回 True 表示这是新事件（应处理），False 表示重复。
@@ -181,6 +230,7 @@ class MatrixClient:
             self._seen_events.discard(oldest)
         self._seen_events_order.append(event_id)
         self._seen_events.add(event_id)
+        self._seen_dirty = True
         return True
 
     # ── 语音转文字 ───────────────────────────────────────────
@@ -242,9 +292,22 @@ class MatrixClient:
                 return
             logger.info("Raw msg from %s in %s: %.50s", sender.split(":")[0], room_id[:12], body)
 
+        # 内容级去重：同一发送者短时间内发来完全相同的文字，大概率是客户端重发
+        # （事件 event_id 不同，_mark_seen 挡不住），不是真的想再问一遍同一句话。
+        now = time.monotonic()
+        cached = self._recent_body_cache.get(sender)
+        if cached and cached[0] == body and (now - cached[1]) < _DUPLICATE_BODY_WINDOW_SECONDS:
+            logger.info(
+                "Duplicate message body from %s within %.1fs, skipping: %.50s",
+                sender.split(":")[0], now - cached[1], body,
+            )
+            return
+        self._recent_body_cache[sender] = (body, now)
+
         for handler in self._event_handlers:
             try:
-                await handler(room_id, sender, body, event)
+                was_voice = msgtype == "m.audio"
+                await handler(room_id, sender, body, event, was_voice)
             except Exception as e:
                 # 单个 handler 出错绝不能冒泡回 _sync_loop 的外层 try，
                 # 否则会被误判为"同步/网络故障"，触发不必要的重连退避。
@@ -268,7 +331,7 @@ class MatrixClient:
         max_retry = 60
         while not self._stop_future.done():
             try:
-                sync_data = await self.client.sync(timeout=30000, full_state=False)
+                sync_data = await self.client.sync(timeout=5000, full_state=False)
                 for room_id, room in (sync_data.get("rooms", {}) or {}).get("join", {}).items():
                     for event in (room.get("timeline", {}) or {}).get("events", []):
                         await self._process_timeline_event(room_id, event)
@@ -287,6 +350,7 @@ class MatrixClient:
                     except Exception as e:
                         logger.error("Join failed %s: %s", room_id, e)
                 retry_delay = 1
+                self._save_seen_events()
             except asyncio.CancelledError:
                 break
             except Exception as e:

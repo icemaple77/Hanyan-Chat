@@ -129,7 +129,7 @@ class HanyanBot:
 
     # ── 消息处理 ─────────────────────────────────────────────────
 
-    async def _on_message(self, room_id: str, sender: str, text: str, event):
+    async def _on_message(self, room_id: str, sender: str, text: str, event, was_voice: bool = False):
         """Matrix 消息回调 — 处理用户消息（文字消息 + 已经过 STT 转写的语音消息）。"""
         logger.info("Message from %s in %s: %.60s", sender, room_id, text)
 
@@ -189,7 +189,7 @@ class HanyanBot:
             if detected:
                 emoji_path = emotion.pick_emoji(detected)
 
-        await self._send_actions(room_id, actions)
+        await self._send_actions(room_id, actions, was_voice)
 
         if emoji_path:
             try:
@@ -197,10 +197,14 @@ class HanyanBot:
             except Exception as e:
                 logger.warning("Failed to send emoji: %s", e)
 
-    async def _send_actions(self, room_id: str, actions: list[tuple[str, str]]):
-        """把 split_reply() 输出的动作序列发送出去（文字/拍一拍/撤回），
-        第一条文字额外触发一次 TTS 语音合成。"""
-        need_tts = True
+    async def _send_actions(self, room_id: str, actions: list[tuple[str, str]], was_voice: bool = False):
+        """把 split_reply() 输出的动作序列发送出去（文字/拍一拍/撤回）。
+        语音输入 → 每一条文字动作都合成语音发出去（而不仅仅是第一条——早期版本
+        只给第一条文字合成语音，`\\` 拆出来的第二、三句会被直接丢弃，用户发语音
+        问问题、bot 回复被拆成好几句时会莫名其妙"漏话"）。
+        文字输入 → 只发文字，第一条文字额外触发一次 TTS 语音合成（图文并茂但不用
+        每句话都等语音合成，兼顾体验和延迟）。"""
+        first_text_tts_done = False
         for action_type, content in actions:
             if action_type == "tickle":
                 await self.matrix.send_tickle(room_id)
@@ -212,17 +216,36 @@ class HanyanBot:
                 await self.matrix.redact_last_sent(room_id)
                 await asyncio.sleep(random.uniform(1.0, 2.0))
             elif action_type == "text" and content:
-                await self.matrix.send_text(room_id, content)
-                if need_tts and len(content) > 2:
-                    need_tts = False
-                    try:
-                        audio_path = await asyncio.get_event_loop().run_in_executor(
-                            None, self.tts.synthesize, content
-                        )
-                        if audio_path:
-                            await self.matrix.send_voice(room_id, audio_path)
-                    except Exception as e:
-                        logger.debug("TTS skipped: %s", e)
+                if was_voice:
+                    # 语音输入 → 语音回复：这一条也合成语音发出去，不发文字
+                    if len(content) > 2:
+                        try:
+                            audio_path = await asyncio.get_event_loop().run_in_executor(
+                                None, self.tts.synthesize, content
+                            )
+                            if audio_path:
+                                await self.matrix.send_voice(room_id, audio_path)
+                            else:
+                                # TTS 失败时兜底发文字，总不能语音输入却完全没回复
+                                await self.matrix.send_text(room_id, content)
+                        except Exception as e:
+                            logger.debug("TTS skipped, falling back to text: %s", e)
+                            await self.matrix.send_text(room_id, content)
+                    else:
+                        await self.matrix.send_text(room_id, content)
+                else:
+                    # 文字输入 → 文字回复，第一条顺带合成一次语音
+                    await self.matrix.send_text(room_id, content)
+                    if not first_text_tts_done and len(content) > 2:
+                        first_text_tts_done = True
+                        try:
+                            audio_path = await asyncio.get_event_loop().run_in_executor(
+                                None, self.tts.synthesize, content
+                            )
+                            if audio_path:
+                                await self.matrix.send_voice(room_id, audio_path)
+                        except Exception as e:
+                            logger.debug("TTS skipped: %s", e)
                 await asyncio.sleep(messaging.typing_delay(content))
 
     async def _try_handle_reminder(self, session: Session, text: str) -> bool:

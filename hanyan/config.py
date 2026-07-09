@@ -37,14 +37,28 @@ _DEFAULT_CONFIG = {
         "temperature": 0.7,
         "timeout": 60,
         "api_key": "",
+        # Qwen3/3.5 这类混合推理模型默认可能会输出 <think>...</think> 思考过程，
+        # 混进正文会污染消息拆句和 JSON 解析（提醒/记忆摘要都要求纯 JSON 输出）。
+        # 这个 app 是纯聊天场景，不需要推理链，默认关闭。只在原生 Ollama 协议
+        # （没配 api_key 时）生效——OpenAI 兼容协议没有这个参数。
+        "think": False,
     },
-    # TTS（文字转语音，SAES/GPT-SoVITS 网关）
+    # TTS（文字转语音）。provider 支持两种：
+    # - "saes"：本地 SAES/GPT-SoVITS 网关，用 base_url + endpoint + engine
+    # - "siliconflow"：SiliconFlow 云端 API（/audio/speech），用 base_url + api_key
+    #   + model + voice + speed，本地没有 TTS 网关时的备选方案
     "tts": {
         "enabled": True,
+        "provider": "saes",
         "base_url": "http://127.0.0.1:9100",
         "endpoint": "/hanyan/stream",
         "timeout": 30,
         "engine": "gptsovits",
+        # 以下三项只在 provider="siliconflow" 时用到
+        "api_key": "",
+        "model": "FunAudioLLM/CosyVoice2-0.5B",
+        "voice": "FunAudioLLM/CosyVoice2-0.5B:anna",
+        "speed": 1.0,
         "max_files": 200,       # data/tts_output 下最多保留的文件数
         "max_age_days": 7,      # 超过这个天数的缓存音频会被清理
     },

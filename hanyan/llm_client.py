@@ -29,6 +29,7 @@ class LLMClient:
         self.temperature = cfg.get("temperature", 0.7)
         self.timeout = cfg.get("timeout", 120)
         self.api_key = cfg.get("api_key", "")
+        self.think = cfg.get("think", False)
 
     def reload_config(self):
         """热加载配置。"""
@@ -46,6 +47,15 @@ class LLMClient:
                 "stream": stream,
                 "temperature": temperature if temperature is not None else self.temperature,
                 "max_tokens": 512,
+                # SiliconFlow（以及其它同样支持混合推理的 OpenAI 兼容网关，比如 DeepSeek
+                # 系列）用 enable_thinking 控制思考模式，和原生 Ollama 协议的 "think" 字段
+                # 是同一个意图、不同字段名。之前只在原生协议分支加了 think:false，OpenAI
+                # 兼容分支完全没管——如果模型（比如 DeepSeek-V4-Flash）默认开着思考模式，
+                # 每次请求都会先生成一整段推理过程，而且这里是非流式调用（stream 由调用方
+                # 决定，chat() 默认非流式），要等推理 + 正文全部生成完才返回一个字，这是
+                # "感觉每次都要等一会"最常见的原因之一。不支持这个字段的网关会直接忽略，
+                # 不影响兼容性。
+                "enable_thinking": self.think,
             }
             headers = {
                 "Content-Type": "application/json",
@@ -57,6 +67,11 @@ class LLMClient:
                 "model": self.model,
                 "messages": messages,
                 "stream": stream,
+                # 关闭混合推理模型（Qwen3/3.5 等）的思考模式：这个 app 是纯聊天场景，
+                # 不需要推理链，且 <think>...</think> 混进正文会破坏消息拆句和 JSON
+                # 解析（提醒/记忆摘要都要求纯 JSON 输出）。旧模型/不支持该参数的模型
+                # 会直接忽略这个字段，不影响兼容性。
+                "think": self.think,
                 "options": {
                     "temperature": temperature if temperature is not None else self.temperature,
                     "num_predict": 512,

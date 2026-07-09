@@ -73,8 +73,8 @@ Hanyan-Chat/
 
 ```bash
 # Ollama（本地 LLM）
-# 参考 https://ollama.com 安装后：
-ollama pull qwen3:8b
+# 参考 https://ollama.com 安装后，拉取一个模型（选型见下面「本地模型选型」）：
+ollama pull qwen3.5:9b
 
 # ffmpeg（TTS 输出压缩 + STT 解码非 wav 音频都要用到）
 brew install ffmpeg   # macOS
@@ -82,6 +82,28 @@ brew install ffmpeg   # macOS
 # Python 3.10+（用到了 list[dict] 之类的内建泛型标注）
 python3 --version
 ```
+
+#### 本地模型选型
+
+这个 app 对模型的要求：中文角色扮演对话质量、能相对可靠地输出纯 JSON（提醒解析、
+记忆摘要都要求严格 JSON 格式，代码里有正则兜底提取，但模型本身输出越干净越好）、
+响应速度过得去。跑在 Apple Silicon 统一内存架构上，模型大小要和内存留出余量给
+STT（whisper-mlx）和 TTS 服务同时跑，不能占满。
+
+| 统一内存 | 推荐模型 | Q4 量化后大小 | 备注 |
+|---|---|---|---|
+| 8-16GB（如 Mac mini M4 16GB） | `qwen3.5:9b` | ~5GB | 甜点选择：质量够用，给 STT/TTS 留够内存余量 |
+| 8-16GB 但明显卡顿/换页 | `qwen3.5:4b` | ~2.5GB | 三个服务（LLM+STT+TTS）同时跑内存紧张时降级 |
+| 18-24GB | `qwen3.5:14b` | ~9GB | 更细腻的角色扮演和更稳的 JSON 输出 |
+| 32GB+ | `qwen3.6:27b` | ~17GB | 目前 Qwen 系列里综合最强的可本地跑档位 |
+
+不建议在 16GB 机器上跑 27B/32B 级别模型——加上 macOS 系统本身占用（~4-5GB）和
+STT/TTS，会挤爆统一内存触发大量 swap，体验反而更差。
+
+Qwen3/3.5 这类模型支持"思考模式"，默认可能会在回复里夹带 `<think>...</think>`
+推理过程，混进正文既不好看，也会干扰消息拆句和 JSON 解析。代码默认通过
+`llm.think: false`（见下方配置字段表）关掉这个模式，不需要额外操作；如果你换成
+不支持这个参数的旧模型，Ollama 会直接忽略该字段，不影响兼容性。
 
 ### 2. Python 依赖
 
@@ -104,7 +126,7 @@ cp config.example.json config.json
 
 然后编辑 `config.json`（字段说明见下表），至少要改：
 - `matrix.homeserver` / `matrix.user_id` / `matrix.password` — 你的 Matrix 账号
-- `llm.base_url` / `llm.model` — 默认指向本地 Ollama 的 `qwen3:8b`
+- `llm.base_url` / `llm.model` — 默认指向本地 Ollama 的 `qwen3.5:9b`（选型见上面「本地模型选型」）
 - `tts.base_url` — 你的 TTS 网关地址；没有 TTS 服务的话把 `tts.enabled` 设为 `false`
 - `stt.enabled` / `stt.model` — 非 Apple Silicon 环境设为 `false`
 
@@ -124,10 +146,13 @@ export HANYAN_WEBUI_SECRET="随便一串随机字符串"
 | `matrix.user_id` | bot 的 Matrix 账号（`@xxx:server`） | — |
 | `matrix.password` | 登录密码（首次登录后会缓存 token 到 `data/access_token.txt`，之后不再需要密码，token 失效会自动重新用密码登录） | — |
 | `llm.base_url` | Ollama 地址，或任意 OpenAI 兼容端点 | `http://localhost:11434` |
-| `llm.model` | 模型名 | `qwen3:8b` |
+| `llm.model` | 模型名，选型见上面「本地模型选型」 | `qwen3.5:9b` |
 | `llm.api_key` | 填了就走 OpenAI 兼容协议（`/chat/completions`），不填走原生 Ollama 协议（`/api/chat`） | 空 |
+| `llm.think` | 是否开启 Qwen3/3.5 等混合推理模型的思考模式。这个 app 是纯聊天场景不需要推理链，且 `<think>` 内容混进正文会破坏消息拆句/JSON 解析，默认关闭。只在原生 Ollama 协议下生效，OpenAI 兼容协议没有这个参数 | `false` |
 | `tts.enabled` | 是否合成语音回复 | `true` |
-| `tts.base_url` / `tts.endpoint` | TTS 网关地址 | `http://127.0.0.1:9100` / `/hanyan/stream` |
+| `tts.provider` | `"saes"`（本地网关）或 `"siliconflow"`（云端 API），见下面「TTS 后端选择」 | `saes` |
+| `tts.base_url` / `tts.endpoint` | SAES 网关地址（`provider="saes"` 时用） | `http://127.0.0.1:9100` / `/hanyan/stream` |
+| `tts.api_key` / `tts.model` / `tts.voice` / `tts.speed` | SiliconFlow 认证/模型/音色/语速（`provider="siliconflow"` 时用） | — |
 | `stt.enabled` | 是否转写用户语音消息 | `true` |
 | `stt.model` | HuggingFace 上的 MLX 格式 Whisper 模型，首次用会自动下载 | `mlx-community/whisper-large-v3-turbo` |
 | `stt.language` | 转写语言，`"auto"` 交给模型自动检测 | `zh` |
@@ -145,6 +170,38 @@ export HANYAN_WEBUI_SECRET="随便一串随机字符串"
 
 > `config.json` 加载时会和内置默认值**深度合并**——升级代码后新增的配置字段会自动补全，
 > 不会因为你的旧 `config.json` 缺字段就报错或功能静默失效。
+
+#### TTS 后端选择
+
+**本地网关（SAES/GPT-SoVITS，默认）**——完全本地，不需要 API Key：
+
+```json
+"tts": {
+  "enabled": true,
+  "provider": "saes",
+  "base_url": "http://127.0.0.1:9100",
+  "endpoint": "/hanyan/stream"
+}
+```
+
+**SiliconFlow 云端 API**——本地没部署 TTS 网关时的备选，需要一个
+[SiliconFlow API Key](https://cloud.siliconflow.cn/account/ak)：
+
+```json
+"tts": {
+  "enabled": true,
+  "provider": "siliconflow",
+  "base_url": "https://api.siliconflow.cn/v1",
+  "api_key": "sk-你的key",
+  "model": "FunAudioLLM/CosyVoice2-0.5B",
+  "voice": "FunAudioLLM/CosyVoice2-0.5B:anna",
+  "speed": 1.0
+}
+```
+
+两种 provider 最终都会尝试用 ffmpeg 把音频压成 OGG/Opus（Matrix 语音气泡
+MSC3245 推荐格式），ffmpeg 不可用时会原样发送未压缩的文件，不会因为转码失败就
+整条语音消息丢弃。
 
 ### 4. 角色
 
