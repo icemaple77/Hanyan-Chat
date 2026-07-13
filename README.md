@@ -332,9 +332,9 @@ docker run -d --name searxng -p 8080:8080 searxng/searxng
 
 `fs_list` / `fs_read` / `fs_write` / `fs_delete` 四个工具，权限模型（`hanyan/fs_access.py`）：
 
-1. **她的主目录**（`fs.home_dir`，默认 `data/home/`）— 自由读写删，是她自己的空间
+1. **她的工作区**（`fs.workspace_dir`，默认 `data/workspace/`）— 自由读写删，是她自己的空间
 2. **只读范围**（`fs.read_roots`，默认你的家目录）— 只能读文件和列目录
-3. **主目录外的写/删** — 生成审批单，她会在聊天里报编号，你回 `/批准 <编号>` 才执行，
+3. **工作区外的写/删** — 生成审批单，她会在聊天里报编号，你回 `/批准 <编号>` 才执行，
    `/拒绝 <编号>` 作废，默认 15 分钟过期，`/待批` 查看队列
 
 安全机制：路径先 realpath 解析（防 `../` 和符号链接逃逸）；`.ssh`/密钥/token/

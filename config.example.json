@@ -96,12 +96,12 @@
   },
   "fs": {
     "enabled": true,
-    "home_dir": "",
+    "workspace_dir": "",
     "read_roots": [
       "~"
     ],
     "max_read_kb": 256,
     "approval_timeout_min": 15,
-    "_说明": "她的文件权限:home_dir(默认data/home)内自由读写删;read_roots内只读;主目录外写/删需聊天里/批准。敏感路径(.ssh/密钥/token等)硬黑名单"
+    "_说明": "她的文件权限:workspace_dir(默认data/workspace)内自由读写删;read_roots内只读;工作区外写/删需聊天里/批准。敏感路径(.ssh/密钥/token等)硬黑名单"
   }
 }

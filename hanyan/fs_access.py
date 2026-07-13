@@ -2,9 +2,9 @@
 Hanyan Chat — 本地文件系统访问（带权限边界和审批流）
 =====================================================
 权限模型（三层）：
-1. 她的主目录（fs.home_dir，默认 data/home/）→ 自由读/写/删
+1. 她的工作区（fs.workspace_dir，默认 data/workspace/）→ 自由读/写/删
 2. 只读范围（fs.read_roots，默认用户家目录）→ 只能读和列目录
-3. 主目录外的写/删 → 生成审批单，用户在聊天里 /批准 <id> 后才执行，
+3. 工作区外的写/删 → 生成审批单，用户在聊天里 /批准 <id> 后才执行，
    默认 15 分钟过期；/拒绝 <id> 或超时自动作废
 
 安全机制：
@@ -38,8 +38,8 @@ _DENY_PARTS = (
 _MAX_WRITE_BYTES = 200_000
 
 
-def _home_dir() -> str:
-    d = config.get("fs.home_dir", "") or os.path.join(config.ROOT_DIR, "data", "home")
+def _workspace_dir() -> str:
+    d = config.get("fs.workspace_dir", "") or os.path.join(config.ROOT_DIR, "data", "workspace")
     d = os.path.realpath(os.path.expanduser(d))
     os.makedirs(d, exist_ok=True)
     return d
@@ -72,13 +72,13 @@ def _resolve(path: str) -> Optional[str]:
     return real
 
 
-def _in_home(real: str) -> bool:
-    home = _home_dir()
+def _in_workspace(real: str) -> bool:
+    home = _workspace_dir()
     return real == home or real.startswith(home + os.sep)
 
 
 def _readable(real: str) -> bool:
-    if _in_home(real):
+    if _in_workspace(real):
         return True
     return any(real == r or real.startswith(r + os.sep) for r in _read_roots())
 
@@ -127,7 +127,7 @@ def fs_read(path: str) -> str:
     return f"{real} 内容（截断到2000字）：\n{text[:2000]}"
 
 
-# ── 写 / 删（主目录内自由；主目录外走审批）───────────────────────
+# ── 写 / 删（工作区内自由；工作区外走审批）───────────────────────
 
 class _PendingOp:
     def __init__(self, op: str, path: str, content: Optional[str], user_id: str):
@@ -185,11 +185,11 @@ def fs_write(path: str, content: str, user_id: str) -> str:
         return "（这个路径不允许访问）"
     if len((content or "").encode("utf-8")) > _MAX_WRITE_BYTES:
         return "（内容太大，超过写入上限）"
-    if _in_home(real):
+    if _in_workspace(real):
         return _do_write(real, content or "")
     pid = _add_pending("write", real, content or "", user_id)
     return (
-        f"（这个位置在你的主目录之外，已生成审批单 #{pid}：写入 {real}。"
+        f"（这个位置在你的工作区之外，已生成审批单 #{pid}：写入 {real}。"
         f"告诉用户需要他回复 /批准 {pid} 才会执行，或 /拒绝 {pid} 作废）"
     )
 
@@ -198,11 +198,11 @@ def fs_delete(path: str, user_id: str) -> str:
     real = _resolve(path)
     if not real:
         return "（这个路径不允许访问）"
-    if _in_home(real):
+    if _in_workspace(real):
         return _do_delete(real)
     pid = _add_pending("delete", real, None, user_id)
     return (
-        f"（这个位置在你的主目录之外，已生成审批单 #{pid}：删除 {real}。"
+        f"（这个位置在你的工作区之外，已生成审批单 #{pid}：删除 {real}。"
         f"告诉用户需要他回复 /批准 {pid} 才会执行，或 /拒绝 {pid} 作废）"
     )
 
