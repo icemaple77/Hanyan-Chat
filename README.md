@@ -159,6 +159,7 @@ export HANYAN_WEBUI_SECRET="随便一串随机字符串"
 | `stt.language` | 转写语言，`"auto"` 交给模型自动检测 | `zh` |
 | `proactive.interval_minutes` | 用户闲置多久后主动发消息 | `30` |
 | `proactive.quiet_start`/`quiet_end` | 安静时段（不主动发消息） | `23:00` ~ `07:00` |
+| `proactive.max_per_day` | 每用户每天主动消息上限（防刷屏兜底；同一房间也不会被多个 session 重复触发） | `24` |
 | `memory.max_entries` | 滚动短期记忆保留的对话轮数 | `50` |
 | `memory.promote_threshold` | 滚动记忆达到多少条时触发摘要成核心记忆 | `30` |
 | `memory.core_memory_max` | 核心记忆条目上限 | `50` |
@@ -305,6 +306,25 @@ python webui.py
 如果要在局域网/公网访问，把 `webui.host` 改成 `0.0.0.0` 前**务必**把 `webui.password`
 和 `webui.secret_key` 改成强随机值（不要用默认的 `CHANGE_ME`），最好再套一层反向代理
 + HTTPS。
+
+## Matrix 服务端（Synapse）配置要点
+
+bot 对 Synapse 有两个特殊要求，配置在 `~/infra/matrix/data/homeserver.yaml`
+（Docker 部署，`docker compose up -d --force-recreate` 生效，改前先备份）：
+
+**限流必须用现行配置名。** 旧版的 `rc_messages_per_second` / `rc_joins_per_second`
+等写法早已废弃，新版 Synapse 会静默忽略 → 实际跑在默认限流（0.2 条/秒）上，bot
+分条发消息立刻撞 `M_LIMIT_EXCEEDED (Too Many Requests)`。正确写法是嵌套结构的
+`rc_message:`（`per_second` / `burst_count`），以及 `rc_login:`、`rc_joins:`。
+
+**媒体要设自动清理。** bot 每条回复都可能上传 TTS 语音和表情 GIF，`media_store`
+会无限增长，用 `media_retention.local_media_lifetime: 30d` 让 30 天前的媒体自动
+删除（文字聊天记录不受影响，只是老语音不能再播放）。
+
+单用户私服还建议：`presence.enabled: false`（省 sync 开销）、listener 的
+`resources.names` 只留 `client` 去掉 `federation`（不联邦，手机 Element 和 bot
+都走 client API 不受影响）、docker-compose 里给容器日志加 `max-size` 限制
+（默认 json-file 不限大小）。
 
 ## 聊天内命令
 
