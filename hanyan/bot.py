@@ -9,8 +9,10 @@ session / memory / emotion / messaging / links / reminders / commands 这些
 """
 
 import asyncio
+import fcntl
 import json
 import logging
+import logging.handlers
 import os
 import random
 import re
@@ -35,13 +37,19 @@ LOG_FILE = os.path.join(DATA_DIR, "hanyan.log")
 
 
 def setup_logging():
-    """配置日志：同时输出到文件和控制台。"""
+    """配置日志：同时输出到文件和控制台。
+    文件用 RotatingFileHandler（单文件 10MB × 3 备份）——之前用普通 FileHandler
+    且 root 是 DEBUG 级，mautrix 的每个 HTTP 请求都写两行日志，几天就把
+    hanyan.log 撑到上百 MB。同时把 mau.http 压到 WARNING，HTTP 流水日志
+    对排查业务问题没用，真出网络错误 WARNING 以上照样能看到。"""
     os.makedirs(DATA_DIR, exist_ok=True)
     fmt = logging.Formatter(
         "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
     fh.setFormatter(fmt)
     fh.setLevel(logging.DEBUG)
 
@@ -53,6 +61,9 @@ def setup_logging():
     root.setLevel(logging.DEBUG)
     root.addHandler(fh)
     root.addHandler(ch)
+
+    logging.getLogger("mau.http").setLevel(logging.WARNING)
+    logging.getLogger("mau").setLevel(logging.INFO)
 
 
 _REMINDER_KEYWORDS = ["提醒", "提醒我", "分钟后", "小时后", "定时", "每天", "每日", "叫我", "叫我起床"]
@@ -78,6 +89,10 @@ class HanyanBot:
         self._auto_message_enabled = True
         self._auto_message_thread: Optional[threading.Thread] = None
         self._auto_message_running = False
+        # 主动消息限频：房间维度记录上次发送时间（两个 session 指向同一房间时
+        # 不能各发一条）；用户维度记录当天已发条数（date_str, count）。
+        self._proactive_last_room: dict[str, float] = {}
+        self._proactive_daily: dict[str, tuple[str, int]] = {}
 
         self._memory_manager_thread: Optional[threading.Thread] = None
         self._memory_manager_running = False
@@ -132,12 +147,10 @@ class HanyanBot:
     async def _on_message(self, room_id: str, sender: str, text: str, event, was_voice: bool = False):
         """Matrix 消息回调 — 处理用户消息（文字消息 + 已经过 STT 转写的语音消息）。"""
         logger.info("Message from %s in %s: %.60s", sender, room_id, text)
-        # 调试追踪
-        import hashlib
-        key = hashlib.md5(text.encode()).hexdigest()[:8]
-        logger.info("🔍 [%s] bot._on_message called body=%.40s", key, text)
-
+        # 立刻更新 last_active：LLM 生成可能要几十秒，如果等 add_message 才更新，
+        # 主动消息线程可能在生成期间误判"用户很久没说话"插进来一条。
         session = self.session_manager.get_or_create(sender, room_id)
+        session.last_active = time.time()
         character_name = config.get_character_for_user(sender)
         session.character_name = character_name
         character = self.char_mgr.get(character_name) or self.char_mgr.current
@@ -186,10 +199,7 @@ class HanyanBot:
         actions = messaging.split_reply(reply)
         if not actions:
             actions = [("text", reply)]
-        logger.info("🔍 LLM reply raw: %d chars, %d actions", len(reply), len(actions))
-        if len(actions) > 1:
-            for i, a in enumerate(actions):
-                logger.info("  action %d: %s = %.50s", i, a[0], a[1])
+        logger.debug("LLM reply: %d chars -> %d action(s)", len(reply), len(actions))
 
         emoji_path = None
         if self._emoji_enabled and random.randint(0, 100) < self._emoji_probability:
@@ -368,14 +378,28 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
 
                 now = time.time()
                 timeout = interval_minutes * 60
+                max_per_day = config.get("proactive.max_per_day", 24)
+                today = datetime.now().strftime("%Y-%m-%d")
                 for session in self.session_manager.all_sessions():
                     if now - session.last_active >= timeout:
                         # 跳过机器人账号的 session，避免给 @hermes 也发主动消息
                         if session.user_id.startswith("@hermes:") or session.user_id.startswith("@serena:"):
                             continue
+                        # 每用户每天上限：主动消息是"想你了"不是"轰炸"，之前没有
+                        # 上限时一天能给同一个人发几十条。
+                        day, count = self._proactive_daily.get(session.user_id, (today, 0))
+                        if day == today and count >= max_per_day:
+                            continue
+                        # 同一房间限频：多个 session 可能落在同一个房间（比如房间里
+                        # 还有别的 bot 也建了 session），不能各自触发各发一条。
+                        last_room_ts = self._proactive_last_room.get(session.room_id, 0)
+                        if now - last_room_ts < timeout:
+                            continue
                         logger.info("Proactive message for %s (idle %.0fs)", session.user_id, now - session.last_active)
                         try:
                             session.last_active = time.time()  # 先更新时间戳，避免 LLM 生成期间再次触发
+                            self._proactive_last_room[session.room_id] = time.time()
+                            self._proactive_daily[session.user_id] = (today, count + 1 if day == today else 1)
                             self._send_proactive_message(session)
                         except Exception as e:
                             logger.error("Proactive message error for %s: %s", session.user_id, e, exc_info=True)
@@ -428,10 +452,6 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
         actions = messaging.split_reply(reply)
         if not actions:
             actions = [("text", reply)]
-        logger.info("🔍 LLM reply raw: %d chars, %d actions", len(reply), len(actions))
-        if len(actions) > 1:
-            for i, a in enumerate(actions):
-                logger.info("  action %d: %s = %.50s", i, a[0], a[1])
 
         def _send_async(coro):
             if self._loop:
@@ -560,10 +580,43 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
         logger.info("Shutdown complete.")
 
 
+_INSTANCE_LOCK_FILE = None  # 模块级引用，防止被 GC 回收导致锁提前释放
+
+
+def acquire_single_instance_lock() -> bool:
+    """单实例锁：flock 排他锁保证同一时刻只有一个 bot 进程在跑。
+
+    背景：实测出现过 3-4 个旧进程同时登录同一 Matrix 账号，用户发一句话，
+    每个进程都独立回复一遍，表现为"一条消息回来一大串"。flock 是进程存活
+    期间自动持有、进程死掉（哪怕 kill -9）自动释放的，不会有 stale pidfile
+    问题。schedule_restart 的 os.execv 会关掉这个 fd（Python fd 默认
+    CLOEXEC），新进程镜像重新走 main() 重新拿锁，也是安全的。"""
+    global _INSTANCE_LOCK_FILE
+    os.makedirs(DATA_DIR, exist_ok=True)
+    lock_path = os.path.join(DATA_DIR, "hanyan.lock")
+    f = open(lock_path, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    f.write(str(os.getpid()))
+    f.flush()
+    _INSTANCE_LOCK_FILE = f
+    return True
+
+
 def main():
     """启动 Hanyan Chat。"""
     setup_logging()
     logger.info("Initializing Hanyan Chat...")
+
+    if not acquire_single_instance_lock():
+        logger.error(
+            "另一个 Hanyan Chat 实例已经在运行（data/hanyan.lock 被占用）。"
+            "请先停掉旧进程：pkill -f 'Hanyan-Chat.*main.py'"
+        )
+        sys.exit(1)
 
     bot = HanyanBot()
 

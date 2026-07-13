@@ -49,6 +49,7 @@ Hanyan-Chat/
 ├── emojis/                  # 情绪表情包，按情绪分文件夹
 │   ├── happy/ sad/ angry/ ...
 ├── data/                    # 运行时数据（记忆/日志/token/提醒等），gitignored
+├── scripts/                 # 启动/运维脚本（launchd 安装、start/stop/status/logs）
 └── hanyan/                  # 核心代码包
     ├── config.py             # 配置加载（深度合并默认值、原子写入）
     ├── character.py          # 角色加载与多用户路由
@@ -230,16 +231,37 @@ description: 19岁活泼女生
 
 ### 5. 启动
 
+#### macOS 推荐方式：launchd（开机自启 + 崩溃自动拉起）
+
 ```bash
-python main.py
+bash scripts/install-launchd.sh   # 只需要跑一次，装完立即启动
+```
+
+之后日常操作：
+
+```bash
+bash scripts/start.sh    # 启动
+bash scripts/stop.sh     # 停止（优雅关闭，不会被自动拉起）
+bash scripts/status.sh   # 看运行状态
+bash scripts/logs.sh     # 实时看日志
+```
+
+崩溃（非 0 退出）会被 launchd 自动重启；`data/hanyan.lock` 上的 flock 单实例锁
+保证任何情况下同时只有一个 bot 进程（手动 `python main.py` 和 launchd 并存时，
+后启动的会直接报错退出，不会出现双进程重复回复）。
+
+#### 手动前台运行（调试用）
+
+```bash
+python3 main.py
 ```
 
 首次启动会用密码登录 Matrix，成功后 token 缓存到 `data/access_token.txt`，之后
-重启不需要再输密码。日志同时输出到控制台和 `data/hanyan.log`。
+重启不需要再输密码。日志同时输出到控制台和 `data/hanyan.log`（10MB×3 自动轮转）。
 
 用 `Ctrl+C` 或发 `SIGTERM` 优雅停止（会等当前提醒线程收尾）。
 
-#### 长期运行（systemd 示例）
+#### 长期运行（Linux systemd 示例）
 
 ```ini
 # /etc/systemd/system/hanyan-chat.service

@@ -35,7 +35,8 @@
   "proactive": {
     "interval_minutes": 30,
     "quiet_start": "23:00",
-    "quiet_end": "07:00"
+    "quiet_end": "07:00",
+    "max_per_day": 24
   },
   "memory": {
     "max_entries": 50,

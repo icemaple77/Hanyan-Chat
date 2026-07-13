@@ -8,8 +8,6 @@ Hanyan Chat — Matrix 通信层（替代 KouriChat 的 wxauto）
 
 import asyncio
 import collections
-import collections
-import hashlib
 import json
 import logging
 import os
@@ -85,15 +83,6 @@ class MatrixClient:
         # DM 缓存，避免每次 sync 都调 get_joined_members（那个会吃限流）
         self._dm_cache: dict[str, bool] = {}
         self._dm_cache_time: dict[str, float] = {}
-        # 调试计数器：统计每条消息被处理的次数
-        self._debug_counters: dict = collections.defaultdict(lambda: collections.defaultdict(int))
-
-    def _debug_track(self, body: str, stage: str):
-        """记录某条消息经过某个阶段的次数。"""
-        key = hashlib.md5(body.encode()).hexdigest()[:8]
-        self._debug_counters[key][stage] += 1
-        count = self._debug_counters[key][stage]
-        logger.info("🔍 [%s] %s → count=%d body=%.40s", key, stage, count, body)
 
     def set_stt_callback(self, callback: Callable[[bytes, str], Optional[str]]):
         """注册语音转文字回调（同步函数，内部会丢进线程池执行，不阻塞事件循环）。"""
@@ -308,9 +297,7 @@ class MatrixClient:
                 return
             logger.info("Raw msg from %s in %s: %.50s", sender.split(":")[0], room_id[:12], body)
 
-        self._debug_track(body, "1_raw_msg")
-
-        # 内容级去重：同一发送者短时间内发来完全相同的文字，大概率是客户端重发
+        # 内容级去重：同一发送者短时间内发来完全相同的文字
         # （事件 event_id 不同，_mark_seen 挡不住），不是真的想再问一遍同一句话。
         now = time.monotonic()
         cached = self._recent_body_cache.get(sender)
@@ -423,13 +410,23 @@ class MatrixClient:
                     logger.exception("Handler error: %s", e)
 
     async def _is_dm(self, room_id: RoomID) -> bool:
-        """判断房间是否为 DM（只有自己和另一个用户）。"""
+        """判断房间是否为 DM（只有自己和另一个用户）。
+        结果缓存 5 分钟——这个方法每条消息都会被调一次，不缓存的话每条消息
+        都要打一次 get_joined_members API（__init__ 里早就声明了 _dm_cache，
+        但之前忘了在这里真正用上）。"""
+        now = time.monotonic()
+        cached_at = self._dm_cache_time.get(room_id, 0)
+        if room_id in self._dm_cache and now - cached_at < 300:
+            return self._dm_cache[room_id]
         try:
             members = await self.client.get_joined_members(room_id)
             others = [u for u in members if u != self.client.mxid]
-            return len(others) == 1
+            result = len(others) == 1
         except Exception:
-            return False
+            return False  # 查询失败不缓存，下次重试
+        self._dm_cache[room_id] = result
+        self._dm_cache_time[room_id] = now
+        return result
 
     def on_message(self, handler: Callable):
         """注册消息处理回调。handler(room_id, sender, text, event)"""
