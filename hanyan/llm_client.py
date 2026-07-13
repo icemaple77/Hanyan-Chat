@@ -186,33 +186,49 @@ def _fallback_reply() -> str:
 
 
 class LLMRouter:
-    """双模型路由：本地模型为主，云端模型（llm.cloud）按用途启用 + 互为 fallback。
+    """双模型路由：本地模型 + 云端模型（llm.cloud，DeepSeek 等 OpenAI 兼容），
+    按用途分配 + 互为 fallback。
 
     purpose 取值：
-    - "chat"       日常对话（默认本地，省 token）
-    - "tools"      工具调用决策（小模型容易格式跑偏，默认优先云端——如果配置了）
-    - "reflection" 自我反思/摘要（低频、质量敏感，默认优先云端——如果配置了）
+    - "chat"       日常对话
+    - "tools"      工具调用决策（小模型容易格式跑偏）
+    - "reflection" 自我反思/摘要（低频、质量敏感）
 
-    路由规则可在 config 里覆盖：llm.cloud.use_for = ["tools", "reflection"]。
-    任一侧失败自动切换另一侧，日志打 [CKPT:llm_fallback] 方便自查。
-    没配 llm.cloud.base_url 时行为与单模型完全一致。
+    分配规则 llm.route（WebUI「模型」页可视化编辑）：
+        {"chat": "local", "tools": "cloud", "reflection": "cloud"}
+    没配 llm.route 时兼容旧写法 llm.cloud.use_for（列表里的用途走云端）。
+    指定 cloud 但云端没配置时自动落回本地；任一侧失败自动切换另一侧，
+    日志打 [CKPT:llm_fallback] 方便自查。
     """
 
     def __init__(self):
         self.local = LLMClient()
         self.cloud: Optional[LLMClient] = None
+        self._init_cloud()
+
+    def _init_cloud(self):
         if config.get("llm.cloud.base_url", ""):
             self.cloud = LLMClient("llm.cloud")
             logger.info("Cloud LLM enabled: %s (%s)", self.cloud.model, self.cloud.base_url)
+        else:
+            self.cloud = None
 
     def reload_config(self):
+        """热加载：本地重读配置；云端按当前配置重建（支持运行中新增/移除云端）。"""
         self.local.reload_config()
-        if self.cloud:
-            self.cloud.reload_config()
+        self._init_cloud()
+
+    def _prefer_cloud(self, purpose: str) -> bool:
+        if self.cloud is None:
+            return False
+        route = config.get("llm.route", None)
+        if isinstance(route, dict):
+            return route.get(purpose, "local") == "cloud"
+        # 兼容旧配置
+        return purpose in (config.get("llm.cloud.use_for", ["tools", "reflection"]) or [])
 
     def chat(self, messages: list[dict], temperature: Optional[float] = None, purpose: str = "chat") -> Optional[str]:
-        cloud_purposes = config.get("llm.cloud.use_for", ["tools", "reflection"]) or []
-        prefer_cloud = self.cloud is not None and purpose in cloud_purposes
+        prefer_cloud = self._prefer_cloud(purpose)
         primary, secondary = (self.cloud, self.local) if prefer_cloud else (self.local, self.cloud)
 
         reply = primary.chat(messages, temperature=temperature)

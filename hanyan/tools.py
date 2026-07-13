@@ -42,27 +42,20 @@ _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML
 # 有效的表情包情绪文件夹（download_image 的 emotion 参数校验用）
 _VALID_EMOTION_FOLDERS = set(EMOTION_FOLDER_MAP.values()) | {"reminded", "tired"}
 
+# 每轮对话注入的工具说明。这是唯一的每轮固定 token 开销（工具执行的中间
+# 结果只活在当轮，不进历史记忆），所以写得尽量紧凑。
 TOOL_SPEC = (
-    "【工具】当你需要实时信息、想找图/表情包、或用户明确要求时，可以使用工具。\n"
-    "用法：单独输出一行（这一行不要夹任何别的字）：\n"
+    "【工具】需要实时信息/找图/操作文件时，单独输出一行：\n"
     '<tool>{"name":"工具名","args":{…}}</tool>\n'
-    "可用工具：\n"
-    '- web_search {"query":"…"} 搜索网络\n'
-    '- fetch_url {"url":"…"} 读取某个网页的正文\n'
-    '- search_images {"query":"…"} 搜索图片，返回图片直链列表\n'
-    '- download_image {"url":"…","emotion":"happy"} 下载图片发给用户；'
-    "emotion 可选（happy/sad/angry/surprised/loved/confused/evasive），"
-    "填了就把这张图收藏进你的表情包库以后也能用\n"
-    '- github_search {"query":"…"} 搜 GitHub 开源项目\n'
-    '- get_time {} 查看现在的日期时间\n'
-    '- fs_list {"path":"…"} 列出本机某个目录的内容（只读）\n'
-    '- fs_read {"path":"…"} 读取本机某个文件的内容（只读）\n'
-    '- fs_write {"path":"…","content":"…"} 写文件。你的工作区（data/workspace）内直接生效；'
-    "工作区外会生成审批单，需要用户 /批准 后才执行\n"
-    '- fs_delete {"path":"…"} 删除文件，审批规则同 fs_write\n'
-    "工具结果会以【工具结果】发给你，看完后用你的角色口吻自然地回复用户，"
-    "不要向用户提及“工具”这个词。不需要工具时就直接正常回复。"
-    "涉及文件操作时要如实转达审批单编号。"
+    "工具：web_search{query} 搜网页｜fetch_url{url} 读网页｜"
+    "search_images{query} 搜图｜download_image{url,emotion?} 下载图发给用户"
+    "（emotion=happy/sad/angry/surprised/loved/confused/evasive 时收藏进表情包库）｜"
+    "github_search{query} 搜开源项目｜get_time{} 查时间｜"
+    "fs_list{path} 列目录｜fs_read{path} 读文件｜"
+    "fs_write{path,content} 写文件｜fs_delete{path} 删文件"
+    "（工作区 data/workspace 外的写/删会生成审批单，需用户 /批准，要如实转达单号）。\n"
+    "结果以【工具结果】给你，之后用角色口吻回复，不要向用户提“工具”二字；"
+    "不需要就直接正常回复。"
 )
 
 # 模型输出里的工具调用匹配：<tool>{...}</tool>，容忍前后空白和代码块包裹

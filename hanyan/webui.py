@@ -251,6 +251,73 @@ def forum_delete(character_name, post_id):
     return redirect(url_for("forum_view", character_name=character_name))
 
 
+# ── 模型配置（本地/云端 + 按用途分配）─────────────────────────────────
+
+_PURPOSES = [("chat", "日常聊天"), ("tools", "工具调用"), ("reflection", "自我反思/摘要")]
+
+
+@app.route("/models")
+@login_required
+def models_page():
+    route = config.get("llm.route", None)
+    if not isinstance(route, dict):
+        use_for = config.get("llm.cloud.use_for", ["tools", "reflection"]) or []
+        route = {p: ("cloud" if p in use_for else "local") for p, _ in _PURPOSES}
+    ctx = {
+        "local_base": config.get("llm.base_url", ""),
+        "local_model": config.get("llm.model", ""),
+        "cloud_base": config.get("llm.cloud.base_url", ""),
+        "cloud_model": config.get("llm.cloud.model", ""),
+        "cloud_key_set": bool(config.get("llm.cloud.api_key", "")),
+        "route": route,
+        "purposes": _PURPOSES,
+    }
+    return render_template_string(_MODELS_TEMPLATE, **ctx)
+
+
+@app.route("/api/models/save", methods=["POST"])
+@login_required
+def models_save():
+    data = request.get_json(silent=True) or {}
+    config.set("llm.base_url", (data.get("local_base") or "http://localhost:11434").strip())
+    config.set("llm.model", (data.get("local_model") or "").strip())
+    config.set("llm.cloud.base_url", (data.get("cloud_base") or "").strip())
+    config.set("llm.cloud.model", (data.get("cloud_model") or "").strip())
+    new_key = (data.get("cloud_key") or "").strip()
+    if new_key:  # 留空 = 不改动现有 key
+        config.set("llm.cloud.api_key", new_key)
+    route = {p: ("cloud" if data.get("route", {}).get(p) == "cloud" else "local") for p, _ in _PURPOSES}
+    config.set("llm.route", route)
+    config.save()
+    if _bot:
+        _bot.router.reload_config()
+        _bot.llm.reload_config()
+    else:
+        llm_client.get_router().reload_config()
+    logger.info("[CKPT:models_saved] route=%s local=%s cloud=%s",
+                route, config.get("llm.model"), config.get("llm.cloud.model") or "-")
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/models/test", methods=["POST"])
+@login_required
+def models_test():
+    """连通性测试：向指定侧发一条极短消息。"""
+    which = (request.get_json(silent=True) or {}).get("which", "local")
+    router = _bot.router if _bot else llm_client.get_router()
+    client = router.cloud if which == "cloud" else router.local
+    if client is None:
+        return jsonify({"ok": False, "message": "云端未配置（先填 base_url 并保存）"})
+    old_timeout = client.timeout
+    client.timeout = min(old_timeout, 30)
+    try:
+        reply = client.chat([{"role": "user", "content": "只回复：ok"}], temperature=0.0)
+    finally:
+        client.timeout = old_timeout
+    ok = reply is not None and reply != llm_client.FALLBACK_REPLY
+    return jsonify({"ok": ok, "message": (reply or "")[:80] if ok else "连接失败，看 data/hanyan.log 详情"})
+
+
 # ── 网页聊天（共用 Matrix 会话）───────────────────────────────────────
 
 def _chat_user_id() -> str:
@@ -405,6 +472,7 @@ _LOGIN_TEMPLATE = _BASE_STYLE + """
 _NAV = """
 <nav>
   <a href="{{ url_for('chat_page') }}">聊天</a>
+  <a href="{{ url_for('models_page') }}">模型</a>
   <a href="{{ url_for('index') }}">配置</a>
   <a href="{{ url_for('list_prompts') }}">角色</a>
   <a href="{{ url_for('list_memory') }}">记忆</a>
@@ -578,6 +646,78 @@ async function send() {
   document.getElementById('typing').style.display = 'none';
 }
 inp.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+</script>
+"""
+
+
+_MODELS_TEMPLATE = _BASE_STYLE + _NAV + """
+<main style="max-width:640px;">
+  <h2>模型配置</h2>
+
+  <div class="card">
+    <h3>本地模型（Ollama）</h3>
+    <label class="muted">服务地址</label>
+    <input type="text" id="local_base" value="{{ local_base }}" placeholder="http://localhost:11434">
+    <label class="muted">模型名</label>
+    <input type="text" id="local_model" value="{{ local_model }}" placeholder="qwen3.5:9b">
+    <button type="button" onclick="test('local')">测试连接</button>
+    <span id="t_local" class="muted"></span>
+  </div>
+
+  <div class="card">
+    <h3>云端模型（OpenAI 兼容：DeepSeek / SiliconFlow…）</h3>
+    <label class="muted">服务地址（留空 = 不用云端）</label>
+    <input type="text" id="cloud_base" value="{{ cloud_base }}" placeholder="https://api.deepseek.com/v1">
+    <label class="muted">模型名</label>
+    <input type="text" id="cloud_model" value="{{ cloud_model }}" placeholder="deepseek-chat">
+    <label class="muted">API Key{{ '（已设置，留空则不改）' if cloud_key_set else '' }}</label>
+    <input type="password" id="cloud_key" placeholder="{{ 'sk-*****（已保存）' if cloud_key_set else 'sk-...' }}">
+    <button type="button" onclick="test('cloud')">测试连接</button>
+    <span id="t_cloud" class="muted"></span>
+  </div>
+
+  <div class="card">
+    <h3>用途分配</h3>
+    <p class="muted">每类任务用哪个模型。选了云端但云端没配置时自动落回本地；任一侧失败自动切换另一侧。</p>
+    <table>
+      {% for p, label in purposes %}
+      <tr>
+        <td>{{ label }}</td>
+        <td>
+          <label><input type="radio" name="r_{{ p }}" value="local" {{ 'checked' if route[p] != 'cloud' }}> 本地</label>
+          &nbsp;&nbsp;
+          <label><input type="radio" name="r_{{ p }}" value="cloud" {{ 'checked' if route[p] == 'cloud' }}> 云端</label>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <button onclick="save()">保存（立即生效，无需重启）</button>
+  <span id="status" class="muted"></span>
+</main>
+<script>
+function val(id){ return document.getElementById(id).value; }
+function routeSel(){
+  const r = {};
+  for (const p of {{ purposes | map(attribute=0) | list | tojson }})
+    r[p] = document.querySelector('input[name="r_'+p+'"]:checked').value;
+  return r;
+}
+async function save(){
+  const body = { local_base: val('local_base'), local_model: val('local_model'),
+                 cloud_base: val('cloud_base'), cloud_model: val('cloud_model'),
+                 cloud_key: val('cloud_key'), route: routeSel() };
+  const r = await fetch('/api/models/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  document.getElementById('status').textContent = (await r.json()).status === 'ok' ? '已保存并生效 ✓' : '保存失败';
+}
+async function test(which){
+  const el = document.getElementById('t_' + which);
+  el.textContent = '测试中…（先保存再测才用新配置）';
+  const r = await fetch('/api/models/test', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({which})});
+  const d = await r.json();
+  el.textContent = d.ok ? ('✓ ' + d.message) : ('✗ ' + d.message);
+}
 </script>
 """
 

@@ -17,11 +17,12 @@
       "api_key": "",
       "model": "deepseek-chat",
       "timeout": 60,
-      "use_for": [
-        "tools",
-        "reflection"
-      ],
-      "_说明": "云端备用模型(OpenAI兼容,如DeepSeek/SiliconFlow)。base_url留空=纯本地。use_for指定哪些用途优先走云端,其余走本地省token,双向fallback"
+      "_说明": "云端模型(OpenAI兼容,如DeepSeek)。base_url留空=纯本地。用途分配见 llm.route(WebUI「模型」页可视化编辑)"
+    },
+    "route": {
+      "chat": "local",
+      "tools": "local",
+      "reflection": "local"
     }
   },
   "tts": {
