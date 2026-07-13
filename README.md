@@ -25,7 +25,7 @@
 | 主动消息 | 用户超时不说话时，bot 结合聊天上下文主动发消息（有安静时段） | `hanyan/bot.py` |
 | TTS 语音回复 | 调用本地 TTS 网关，WAV 自动压 OGG（Matrix 语音气泡） | `hanyan/tts_client.py` |
 | **STT 语音输入（新）** | 本地 whisper-mlx 转写用户发来的语音消息，转完直接进普通聊天流程 | `hanyan/stt_client.py` |
-| WebUI | 配置编辑 / 角色编辑 / 记忆查看 / 极简动态（发帖+点赞） | `hanyan/webui.py` |
+| WebUI | **网页聊天（与 Matrix 会话同步）**/ 配置编辑 / 角色编辑 / 记忆查看 / 极简动态 | `hanyan/webui.py` |
 | **工具调用（新）** | 角色可自主搜网页/读链接/搜图/下载图片和表情包/搜 GitHub/查时间 | `hanyan/tools.py` |
 | **自我进化（新）** | 每日自我反思更新成长档案，兴趣随聊天演化，表情包库自动扩充，带检查点回溯 | `hanyan/evolution.py` |
 | **双模型路由（新）** | 本地模型为主 + 云端（DeepSeek 等）按用途启用，双向 fallback 省 token | `hanyan/llm_client.py` |
@@ -295,9 +295,20 @@ journalctl -u hanyan-chat -f
 
 ### 6. WebUI（可选）
 
+**内嵌模式（推荐）**：`config.json` 里 `webui.enabled: true`，WebUI 随 bot 一起启动
+（默认 `http://127.0.0.1:5001`）。「聊天」页和 Matrix 是**同一段对话**：共用
+session、记忆、成长档案和工具，打开自动加载历史记录，网页上聊的内容她在
+Element 里也记得（反之亦然）。聊天身份默认绑定最活跃的 Matrix 用户，可用
+`webui.chat_user_id` 固定。注意：网页消息不会出现在 Element 的聊天记录里
+（没有走 Matrix 协议），同步的是"她的记忆"而不是消息流。
+
+**独立模式**：
+
 ```bash
 python webui.py
 ```
+
+独立进程运行时聊天退化为共用磁盘记忆（上下文依然连续，但不共享内存态 session）。
 
 默认监听 `127.0.0.1:5001`，登录用户名/密码是 `config.json` 里的 `webui.username`/
 `webui.password`。可以：

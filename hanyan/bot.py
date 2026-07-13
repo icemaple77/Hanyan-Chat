@@ -243,48 +243,10 @@ class HanyanBot:
                 logger.warning("Failed to send emoji: %s", e)
 
     async def _chat_with_tools(self, messages: list[dict], sender: str, character_name: str) -> tuple[str, list[str]]:
-        """带工具调用循环的 LLM 对话。
-
-        模型输出 <tool>{...}</tool> 时执行工具、把结果喂回去再生成，最多
-        tools.max_calls_per_turn 轮，防止死循环。github_search 的结果自动归档
-        进提案文件（自我进化：她研究到的开源项目留给人审核吸收）。
-        返回 (最终回复, 工具下载的图片路径列表)。"""
-        loop = asyncio.get_event_loop()
-        tool_images: list[str] = []
-        tools_enabled = config.get("tools.enabled", True)
-        max_calls = int(config.get("tools.max_calls_per_turn", 3))
-        purpose = "chat"
-
-        for _ in range(max_calls + 1):
-            reply = await loop.run_in_executor(
-                None, lambda m=list(messages), p=purpose: self.router.chat(m, purpose=p)
-            )
-            call = tools.parse_tool_call(reply) if tools_enabled else None
-            if not call:
-                return reply or "", tool_images
-
-            name, args = call
-            result = await loop.run_in_executor(None, tools.execute, name, args, sender)
-            if result.get("image"):
-                tool_images.append(result["image"])
-            if name == "github_search" and result.get("text"):
-                evolution.append_proposal(sender, character_name, f"github_search: {args.get('query', '')}", result["text"])
-
-            messages.append({"role": "assistant", "content": reply})
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"【工具结果】\n{result['text']}\n"
-                    "（基于结果继续。若还需要别的工具可再调用一次，否则请用你的角色口吻回复用户，不要提到工具。）"
-                ),
-            })
-            purpose = "tools"  # 后续轮次按工具用途路由（配置了云端则优先云端）
-
-        # 超出工具轮数上限，强制收尾
-        logger.info("[CKPT:tool_limit] max tool calls reached, forcing final reply")
-        messages.append({"role": "user", "content": "（不要再调用工具了，直接用角色口吻回复用户。）"})
-        reply = await loop.run_in_executor(None, lambda: self.router.chat(messages, purpose="chat"))
-        return reply or "", tool_images
+        """带工具调用循环的 LLM 对话（实际逻辑在 tools.chat_loop，和 WebUI 聊天共用）。"""
+        return await asyncio.get_event_loop().run_in_executor(
+            None, tools.chat_loop, self.router, messages, sender, character_name
+        )
 
     async def _send_actions(self, room_id: str, actions: list[tuple[str, str]], was_voice: bool = False):
         """把 split_reply() 输出的动作序列发送出去（文字/拍一拍/撤回）。
@@ -638,6 +600,16 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
         self._memory_manager_thread = threading.Thread(target=self._memory_manager_loop, name="MemoryManager", daemon=True)
         self._memory_manager_thread.start()
         logger.info("Memory manager started")
+
+        # 内嵌 WebUI（webui.enabled=true 时随 bot 一起启动，共用 session/记忆/路由器，
+        # 网页聊天和 Matrix 聊天是同一段对话）
+        if config.get("webui.enabled", False):
+            from . import webui
+            threading.Thread(target=webui.run_embedded, args=(self,), name="WebUI", daemon=True).start()
+            logger.info(
+                "Embedded WebUI starting on http://%s:%s",
+                config.get("webui.host", "127.0.0.1"), config.get("webui.port", 5001),
+            )
 
         self._running = True
         loop = asyncio.get_event_loop()

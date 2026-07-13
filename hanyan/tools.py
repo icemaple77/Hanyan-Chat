@@ -281,6 +281,49 @@ def _github_search(query: str) -> str:
     return "\n".join(lines)
 
 
+# ── 工具调用循环（bot 的 Matrix 消息处理和 WebUI 聊天共用）────────
+
+def chat_loop(router, messages: list[dict], user_id: str, character_name: str) -> tuple[str, list[str]]:
+    """同步的「LLM ↔ 工具」循环：模型输出 <tool>…</tool> 就执行工具、
+    结果喂回再生成，最多 tools.max_calls_per_turn 轮防死循环。
+    github_search 结果自动归档进提案文件。
+    返回 (最终回复, 工具下载的图片路径列表)。同步函数——bot 侧丢线程池跑，
+    WebUI 侧直接在请求线程里跑。"""
+    from . import evolution  # 延迟导入，避免 tools ↔ evolution 潜在环
+
+    tool_images: list[str] = []
+    enabled = config.get("tools.enabled", True)
+    max_calls = int(config.get("tools.max_calls_per_turn", 3))
+    purpose = "chat"
+
+    for _ in range(max_calls + 1):
+        reply = router.chat(list(messages), purpose=purpose)
+        call = parse_tool_call(reply) if enabled else None
+        if not call:
+            return reply or "", tool_images
+
+        name, args = call
+        result = execute(name, args, user_id)
+        if result.get("image"):
+            tool_images.append(result["image"])
+        if name == "github_search" and result.get("text"):
+            evolution.append_proposal(user_id, character_name, f"github_search: {args.get('query', '')}", result["text"])
+
+        messages.append({"role": "assistant", "content": reply})
+        messages.append({
+            "role": "user",
+            "content": (
+                f"【工具结果】\n{result['text']}\n"
+                "（基于结果继续。若还需要别的工具可再调用一次，否则请用你的角色口吻回复用户，不要提到工具。）"
+            ),
+        })
+        purpose = "tools"
+
+    logger.info("[CKPT:tool_limit] max tool calls reached, forcing final reply")
+    messages.append({"role": "user", "content": "（不要再调用工具了，直接用角色口吻回复用户。）"})
+    return router.chat(messages, purpose="chat") or "", tool_images
+
+
 # ── 自我清理 ─────────────────────────────────────────────────────
 
 def cleanup_downloads(max_age_days: int = 7) -> int:

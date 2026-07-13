@@ -79,7 +79,9 @@
     "port": 5001,
     "username": "admin",
     "password": "CHANGE_ME_OR_SET_HANYAN_WEBUI_PASSWORD_ENV",
-    "secret_key": "CHANGE_ME_OR_SET_HANYAN_WEBUI_SECRET_ENV"
+    "secret_key": "CHANGE_ME_OR_SET_HANYAN_WEBUI_SECRET_ENV",
+    "chat_user_id": "",
+    "_说明": "chat_user_id=网页聊天绑定的Matrix用户(留空自动取最活跃会话);enabled=true时WebUI随bot内嵌启动,网页聊天与Matrix共用会话"
   },
   "tools": {
     "enabled": true,

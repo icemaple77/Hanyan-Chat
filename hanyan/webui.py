@@ -16,11 +16,12 @@ import functools
 import json
 import logging
 import os
+import time
 from datetime import datetime
 
-from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
+from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
 
-from . import config, memory
+from . import config, evolution, llm_client, memory, messaging, tools
 from .character import get_manager as get_character_manager
 
 logger = logging.getLogger("hanyan.webui")
@@ -29,6 +30,12 @@ app = Flask(__name__)
 app.secret_key = config.get("webui.secret_key", "change-this-secret-key")
 
 _FORUM_DIR = os.path.join(config.ROOT_DIR, "data", "forum")
+
+# 内嵌模式下由 run_embedded() 注入 bot 实例：网页聊天直接共用 bot 的
+# session_manager 和 LLM 路由器，和 Matrix 聊天是同一段对话。
+# 独立运行（python webui.py）时为 None，聊天退化为"共用磁盘记忆"模式——
+# 上下文仍然连续（bot 每轮都从磁盘读记忆），只是不共享内存态 session。
+_bot = None
 
 
 # ── 登录保护 ──────────────────────────────────────────────────────────
@@ -244,6 +251,126 @@ def forum_delete(character_name, post_id):
     return redirect(url_for("forum_view", character_name=character_name))
 
 
+# ── 网页聊天（共用 Matrix 会话）───────────────────────────────────────
+
+def _chat_user_id() -> str:
+    """网页聊天绑定的用户身份：配置优先，否则取最活跃的非 bot session，
+    再退化到 character.user_map 里的第一个用户。"""
+    configured = config.get("webui.chat_user_id", "")
+    if configured:
+        return configured
+    if _bot:
+        candidates = [
+            s for s in _bot.session_manager.all_sessions()
+            if not s.user_id.startswith(("@hermes:", "@serena:"))
+        ]
+        if candidates:
+            return max(candidates, key=lambda s: s.last_active).user_id
+    user_map = config.get("character.user_map", {}) or {}
+    if user_map:
+        return next(iter(user_map))
+    return "@webui:local"
+
+
+@app.route("/chat")
+@login_required
+def chat_page():
+    return render_template_string(_CHAT_TEMPLATE)
+
+
+@app.route("/api/chat/state")
+@login_required
+def chat_state():
+    user_id = _chat_user_id()
+    character_name = config.get_character_for_user(user_id)
+    history = memory.load_memory(user_id, character_name)[-60:]
+    return jsonify({"user_id": user_id, "character": character_name, "history": history})
+
+
+@app.route("/api/chat/send", methods=["POST"])
+@login_required
+def chat_send():
+    text = (request.get_json(silent=True) or {}).get("text", "").strip()
+    if not text:
+        return jsonify({"error": "empty"}), 400
+    user_id = _chat_user_id()
+    character_name = config.get_character_for_user(user_id)
+
+    # 组装和 bot._on_message 一致的上下文：角色 + 核心记忆 + 动态上下文 + 工具说明 + 滚动记忆
+    char = get_character_manager().get(character_name) or get_character_manager().current
+    msgs = []
+    if char:
+        msgs.append(char.system_message())
+    core = memory.format_core_memory_for_prompt(memory.load_core_memory(user_id, character_name))
+    if core:
+        msgs.append({"role": "system", "content": core})
+    dyn = evolution.build_context_block(user_id, character_name)
+    if dyn:
+        msgs.append({"role": "system", "content": dyn})
+    if config.get("tools.enabled", True):
+        msgs.append({"role": "system", "content": tools.TOOL_SPEC})
+    msgs.extend(memory.load_memory(user_id, character_name)[-20:])
+    msgs.append({"role": "user", "content": text})
+
+    if _bot:
+        router = _bot.router
+        # 共用内存态 session：网页发言也算"用户活跃"，主动消息不会误触发；
+        # 不覆盖已有 session 的 Matrix room_id
+        sess = _bot.session_manager.get(user_id) or _bot.session_manager.get_or_create(user_id, "webui")
+        sess.last_active = time.time()
+        sess.add_message("user", text)
+    else:
+        router = llm_client.get_router()
+        sess = None
+
+    reply, tool_images = tools.chat_loop(router, msgs, user_id, character_name)
+    reply = tools.strip_tool_calls(reply) or reply or "[嗯，我现在有点累，稍后再聊好吗？]"
+
+    if sess:
+        sess.add_message("assistant", reply)
+    memory.append_memory(user_id, character_name, text, reply)
+
+    # 按消息模板拆条渲染（和 Matrix 端一致的多气泡体验）
+    segments = []
+    for action_type, content in messaging.split_reply(reply):
+        if action_type == "text" and content:
+            segments.append(content)
+        elif action_type in ("tickle", "tickle_self"):
+            segments.append("〔拍了拍你〕" if action_type == "tickle" else "〔拍了拍自己〕")
+    if not segments:
+        segments = [reply]
+
+    images = ["/chat/media?p=" + os.path.relpath(p, config.ROOT_DIR) for p in tool_images]
+    return jsonify({"segments": segments, "images": images})
+
+
+@app.route("/chat/media")
+@login_required
+def chat_media():
+    """受限的本地图片服务：只允许项目内 emojis/ 和 data/downloads/ 下的文件。"""
+    rel = request.args.get("p", "")
+    real = os.path.realpath(os.path.join(config.ROOT_DIR, rel))
+    allowed = (
+        os.path.realpath(os.path.join(config.ROOT_DIR, "emojis")),
+        os.path.realpath(os.path.join(config.ROOT_DIR, "data", "downloads")),
+    )
+    if not any(real.startswith(a + os.sep) for a in allowed) or not os.path.isfile(real):
+        abort(404)
+    return send_file(real)
+
+
+def run_embedded(bot):
+    """在 bot 进程内以线程方式运行 WebUI（bot.start() 调用）。"""
+    global _bot
+    _bot = bot
+    host = config.get("webui.host", "127.0.0.1")
+    port = config.get("webui.port", 5001)
+    try:
+        app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+    except Exception as e:
+        logger.error("Embedded WebUI failed to start: %s", e)
+
+
 # ── 模板（内联，避免依赖 templates/ 目录）─────────────────────────────
 
 _BASE_STYLE = """
@@ -277,6 +404,7 @@ _LOGIN_TEMPLATE = _BASE_STYLE + """
 
 _NAV = """
 <nav>
+  <a href="{{ url_for('chat_page') }}">聊天</a>
   <a href="{{ url_for('index') }}">配置</a>
   <a href="{{ url_for('list_prompts') }}">角色</a>
   <a href="{{ url_for('list_memory') }}">记忆</a>
@@ -391,6 +519,66 @@ _FORUM_TEMPLATE = _BASE_STYLE + _NAV + """
     <p class="muted">还没有动态。</p>
   {% endfor %}
 </main>
+"""
+
+
+_CHAT_TEMPLATE = _BASE_STYLE + _NAV + """
+<style>
+  #box { max-width:720px; margin:0 auto; display:flex; flex-direction:column; height:calc(100vh - 60px); }
+  #log { flex:1; overflow-y:auto; padding:16px; }
+  .msg { max-width:78%; padding:9px 13px; border-radius:14px; margin:4px 0; font-size:14px;
+         line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+  .me   { background:#6b4c9a; color:#fff; margin-left:auto; border-bottom-right-radius:4px; }
+  .her  { background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.08); border-bottom-left-radius:4px; }
+  .msg img { max-width:200px; border-radius:8px; display:block; }
+  #bar { display:flex; gap:8px; padding:12px 16px; background:#fff; border-top:1px solid #e5e0ec; }
+  #inp { flex:1; padding:10px; border:1px solid #d8d0e5; border-radius:20px; font-size:14px; outline:none; }
+  #hdr { text-align:center; padding:8px; color:#888; font-size:12px; }
+  .typing { color:#888; font-size:13px; padding:4px 16px; display:none; }
+</style>
+<div id="box">
+  <div id="hdr">加载中…</div>
+  <div id="log"></div>
+  <div class="typing" id="typing">正在输入…</div>
+  <div id="bar">
+    <input id="inp" placeholder="说点什么…" autocomplete="off">
+    <button onclick="send()">发送</button>
+  </div>
+</div>
+<script>
+const log = document.getElementById('log'), inp = document.getElementById('inp');
+function bubble(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+function pic(url) {
+  const d = document.createElement('div'); d.className = 'msg her';
+  const i = document.createElement('img'); i.src = url; d.appendChild(i);
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+fetch('/api/chat/state').then(r => r.json()).then(s => {
+  document.getElementById('hdr').textContent = s.character + ' · 与 Matrix 会话同步（' + s.user_id + '）';
+  for (const m of s.history) bubble(m.role === 'user' ? 'me' : 'her', m.content);
+});
+async function send() {
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = ''; bubble('me', text);
+  document.getElementById('typing').style.display = 'block';
+  try {
+    const r = await fetch('/api/chat/send', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    const data = await r.json();
+    for (const seg of (data.segments || [])) { bubble('her', seg); await new Promise(x => setTimeout(x, 350)); }
+    for (const u of (data.images || [])) pic(u);
+  } catch (e) { bubble('her', '（发送失败：' + e + '）'); }
+  document.getElementById('typing').style.display = 'none';
+}
+inp.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+</script>
 """
 
 
