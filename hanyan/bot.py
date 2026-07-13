@@ -132,6 +132,10 @@ class HanyanBot:
     async def _on_message(self, room_id: str, sender: str, text: str, event, was_voice: bool = False):
         """Matrix 消息回调 — 处理用户消息（文字消息 + 已经过 STT 转写的语音消息）。"""
         logger.info("Message from %s in %s: %.60s", sender, room_id, text)
+        # 调试追踪
+        import hashlib
+        key = hashlib.md5(text.encode()).hexdigest()[:8]
+        logger.info("🔍 [%s] bot._on_message called body=%.40s", key, text)
 
         session = self.session_manager.get_or_create(sender, room_id)
         character_name = config.get_character_for_user(sender)
@@ -182,6 +186,10 @@ class HanyanBot:
         actions = messaging.split_reply(reply)
         if not actions:
             actions = [("text", reply)]
+        logger.info("🔍 LLM reply raw: %d chars, %d actions", len(reply), len(actions))
+        if len(actions) > 1:
+            for i, a in enumerate(actions):
+                logger.info("  action %d: %s = %.50s", i, a[0], a[1])
 
         emoji_path = None
         if self._emoji_enabled and random.randint(0, 100) < self._emoji_probability:
@@ -205,7 +213,7 @@ class HanyanBot:
         文字输入 → 只发文字，第一条文字额外触发一次 TTS 语音合成（图文并茂但不用
         每句话都等语音合成，兼顾体验和延迟）。"""
         first_text_tts_done = False
-        for action_type, content in actions:
+        for i, (action_type, content) in enumerate(actions):
             if action_type == "tickle":
                 await self.matrix.send_tickle(room_id)
                 await asyncio.sleep(random.uniform(1.0, 2.0))
@@ -233,8 +241,9 @@ class HanyanBot:
                             await self.matrix.send_text(room_id, content)
                     else:
                         await self.matrix.send_text(room_id, content)
-                else:
+                if not was_voice:
                     # 文字输入 → 文字回复，第一条顺带合成一次语音
+                    logger.debug("SENDING action %d/%d: %d chars", i + 1, len(actions), len(content))
                     await self.matrix.send_text(room_id, content)
                     if not first_text_tts_done and len(content) > 2:
                         first_text_tts_done = True
@@ -335,6 +344,9 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
 
     def _auto_message_loop(self):
         """后台线程：检查用户超时，发送主动消息；同时顺带回收空闲 session。"""
+        if hasattr(self, '_auto_message_started') and self._auto_message_started:
+            return
+        self._auto_message_started = True
         self._auto_message_running = True
         interval_minutes = config.get("proactive.interval_minutes", 30)
         quiet_start_str = config.get("proactive.quiet_start", "23:00")
@@ -358,8 +370,12 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
                 timeout = interval_minutes * 60
                 for session in self.session_manager.all_sessions():
                     if now - session.last_active >= timeout:
+                        # 跳过机器人账号的 session，避免给 @hermes 也发主动消息
+                        if session.user_id.startswith("@hermes:") or session.user_id.startswith("@serena:"):
+                            continue
                         logger.info("Proactive message for %s (idle %.0fs)", session.user_id, now - session.last_active)
                         try:
+                            session.last_active = time.time()  # 先更新时间戳，避免 LLM 生成期间再次触发
                             self._send_proactive_message(session)
                         except Exception as e:
                             logger.error("Proactive message error for %s: %s", session.user_id, e, exc_info=True)
@@ -412,6 +428,10 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
         actions = messaging.split_reply(reply)
         if not actions:
             actions = [("text", reply)]
+        logger.info("🔍 LLM reply raw: %d chars, %d actions", len(reply), len(actions))
+        if len(actions) > 1:
+            for i, a in enumerate(actions):
+                logger.info("  action %d: %s = %.50s", i, a[0], a[1])
 
         def _send_async(coro):
             if self._loop:

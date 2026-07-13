@@ -63,12 +63,8 @@ def _split_single_backslash(text: str) -> list[str]:
 
 
 def split_reply(text: str) -> list[tuple[str, str]]:
-    """
-    将 LLM 回复解析成一串 (动作类型, 内容) 的发送序列：
-    - [tickle] / [tickle_self] / [recall] 作为独立动作标记
-    - 其余文本依次按 $ → 换行/连续 3+ 个 \\（硬边界） → 单个 \\（跳过颜文字）拆成多条消息
-    动作类型: "text" | "tickle" | "tickle_self" | "recall"
-    """
+    """将 LLM 回复解析成一串发送动作。
+    不做断句拆分，整段回复作为一条消息发送（仅保留 [tickle] 标记）。"""
     if not text:
         return []
     actions: list[tuple[str, str]] = []
@@ -78,14 +74,11 @@ def split_reply(text: str) -> list[tuple[str, str]]:
         if seg in ("[tickle]", "[tickle_self]", "[recall]"):
             actions.append((seg[1:-1], ""))
             continue
-        for dollar_chunk in seg.split("$"):
-            if not dollar_chunk:
-                continue
-            for hard_chunk in _split_on_hard_boundaries(dollar_chunk):
-                for sentence in _split_single_backslash(hard_chunk):
-                    cleaned = sentence.strip()
-                    if cleaned:
-                        actions.append(("text", cleaned))
+        cleaned = seg.strip()
+        if cleaned:
+            actions.append(("text", cleaned))
+    if not actions:
+        actions.append(("text", text.strip()))
     return actions
 
 

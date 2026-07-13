@@ -8,6 +8,8 @@ Hanyan Chat — Matrix 通信层（替代 KouriChat 的 wxauto）
 
 import asyncio
 import collections
+import collections
+import hashlib
 import json
 import logging
 import os
@@ -46,7 +48,7 @@ _SEEN_EVENTS_PATH = os.path.join(config.ROOT_DIR, "data", "seen_events.json")
 # 自动重发（重发时会生成新的 event_id，_mark_seen 按 event_id 去重完全拦不住，
 # 实测日志里出现过同一句话在同一秒内被当成 3 条不同事件、各自触发一次完整
 # LLM 回复的情况）。这里按"发送者+文字内容"做一层内容级去重兜底。
-_DUPLICATE_BODY_WINDOW_SECONDS = 4.0
+_DUPLICATE_BODY_WINDOW_SECONDS = 60.0  # LLM 回复慢，窗口要大于一次 LLM 生成时间
 
 # 不是所有 mautrix-python 版本都在 EventType 上预置了 REACTION 常量，
 # 用 find() 兜底，保证 [tickle]/[tickle_self] 在任意版本下都不会因为
@@ -80,6 +82,18 @@ class MatrixClient:
         # 放在这一层而不是上层 bot 逻辑里判断 msgtype，是因为"语音先转文字再走正常流程"
         # 本质上是传输层的预处理，转完之后 handler 完全不需要知道这条消息原本是语音。
         self._stt_callback: Optional[Callable[[bytes, str], Optional[str]]] = None
+        # DM 缓存，避免每次 sync 都调 get_joined_members（那个会吃限流）
+        self._dm_cache: dict[str, bool] = {}
+        self._dm_cache_time: dict[str, float] = {}
+        # 调试计数器：统计每条消息被处理的次数
+        self._debug_counters: dict = collections.defaultdict(lambda: collections.defaultdict(int))
+
+    def _debug_track(self, body: str, stage: str):
+        """记录某条消息经过某个阶段的次数。"""
+        key = hashlib.md5(body.encode()).hexdigest()[:8]
+        self._debug_counters[key][stage] += 1
+        count = self._debug_counters[key][stage]
+        logger.info("🔍 [%s] %s → count=%d body=%.40s", key, stage, count, body)
 
     def set_stt_callback(self, callback: Callable[[bytes, str], Optional[str]]):
         """注册语音转文字回调（同步函数，内部会丢进线程池执行，不阻塞事件循环）。"""
@@ -116,8 +130,9 @@ class MatrixClient:
 
         # 注册事件处理器（供 mautrix 内建 dispatcher 使用；实际消息路径走下面的
         # 手动 _sync_loop，这两条路径互不冲突）
-        self.client.add_event_handler(EventType.ROOM_MESSAGE, self._on_message, wait_sync=True)
         self.client.add_event_handler(EventType.ROOM_MEMBER, self._on_room_member, wait_sync=True)
+        # 消息处理走手动 sync 循环（_sync_loop），不注册 mautrix 内建 dispatcher，
+        # 避免每条消息被处理两次。
 
         # 开始同步
         self._stop_future = asyncio.get_event_loop().create_future()
@@ -278,6 +293,7 @@ class MatrixClient:
         content = event.get("content", {})
         msgtype = content.get("msgtype", "")
 
+        body = ""
         if msgtype == "m.audio":
             # 语音消息：不能直接把 body（通常是文件名，比如 "voice-message.ogg"）
             # 当成聊天内容发给 LLM——那样等于在瞎聊文件名。必须先过 STT。
@@ -291,6 +307,8 @@ class MatrixClient:
             if not body:
                 return
             logger.info("Raw msg from %s in %s: %.50s", sender.split(":")[0], room_id[:12], body)
+
+        self._debug_track(body, "1_raw_msg")
 
         # 内容级去重：同一发送者短时间内发来完全相同的文字，大概率是客户端重发
         # （事件 event_id 不同，_mark_seen 挡不住），不是真的想再问一遍同一句话。
