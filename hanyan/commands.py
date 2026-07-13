@@ -30,6 +30,9 @@ COMMAND_ALIASES = {
     "/兴趣": "interests", "/int": "interests",
     "/提案": "proposals", "/pp": "proposals",
     "/清理": "cleanup", "/gc": "cleanup",
+    "/任务": "task_start", "/task": "task_start",
+    "/任务状态": "task_state", "/ts": "task_state",
+    "/停止任务": "task_stop", "/tstop": "task_stop",
     "/批准": "approve", "/ok": "approve",
     "/拒绝": "reject", "/no": "reject",
     "/待批": "pending", "/pd": "pending",
@@ -49,6 +52,9 @@ HELP_TEXT = (
     "/兴趣 或 /int — 看看她最近对什么感兴趣\n"
     "/提案 或 /pp — 查看她收集的功能提案（GitHub 调研归档）\n"
     "/清理 或 /gc — 立刻清理过期的下载缓存\n"
+    "/任务 <目标> 或 /task <目标> — 交给她一个多步任务（后台拆解执行）\n"
+    "/任务状态 或 /ts — 看任务进度\n"
+    "/停止任务 或 /tstop — 中止当前任务\n"
     "/批准 <编号> 或 /ok <编号> — 批准她的文件操作申请\n"
     "/拒绝 <编号> 或 /no <编号> — 拒绝申请\n"
     "/待批 或 /pd — 查看待批准的文件操作\n"
@@ -126,6 +132,12 @@ async def dispatch(bot, session: Session, room_id: str, sender: str, text: str) 
     elif action == "cleanup":
         removed = tools.cleanup_downloads(0)  # 0 = 全部临时下载立即清
         reply = f"清理完成，删掉了 {removed} 个缓存文件。"
+    elif action == "task_start":
+        reply = bot.task_runner.start(sender, room_id, session.character_name, arg) if arg else "用法：/任务 <想让她做的事>"
+    elif action == "task_state":
+        reply = bot.task_runner.state()
+    elif action == "task_stop":
+        reply = bot.task_runner.stop()
     elif action in ("approve", "reject"):
         try:
             pid = int(arg)

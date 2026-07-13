@@ -106,5 +106,9 @@
     "max_read_kb": 256,
     "approval_timeout_min": 15,
     "_说明": "她的文件权限:workspace_dir(默认data/workspace)内自由读写删;read_roots内只读;工作区外写/删需聊天里/批准。敏感路径(.ssh/密钥/token等)硬黑名单"
+  },
+  "agent": {
+    "max_steps": 5,
+    "_说明": "多步任务执行:步数上限;每步工具调用沿用tools.max_calls_per_turn;同时只跑一个任务"
   }
 }

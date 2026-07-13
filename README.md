@@ -28,7 +28,8 @@
 | WebUI | **网页聊天（与 Matrix 会话同步）**/ 配置编辑 / 角色编辑 / 记忆查看 / 极简动态 | `hanyan/webui.py` |
 | **工具调用（新）** | 角色可自主搜网页/读链接/搜图/下载图片和表情包/搜 GitHub/查时间 | `hanyan/tools.py` |
 | **自我进化（新）** | 每日自我反思更新成长档案，兴趣随聊天演化，表情包库自动扩充，带检查点回溯 | `hanyan/evolution.py` |
-| **双模型路由（新）** | 本地模型为主 + 云端（DeepSeek 等）按用途启用，双向 fallback 省 token | `hanyan/llm_client.py` |
+| **双模型路由（新）** | 本地模型为主 + 云端（DeepSeek 等）按用途分配，双向 fallback 省 token | `hanyan/llm_client.py` |
+| **任务执行（新）** | 多步任务：自动拆解 → 逐步执行（可用工具）→ 自我验证重试 → 汇报+报告落盘 | `hanyan/agent.py` |
 
 ### 和 KouriChat 原版的差异
 
@@ -338,6 +339,17 @@ SearXNG 然后配 `tools.searxng_url`：
 docker run -d --name searxng -p 8080:8080 searxng/searxng
 # config.json: "tools": {"searxng_url": "http://127.0.0.1:8080"}
 ```
+
+### 任务执行（规划 → 执行 → 验证 → 汇报）
+
+聊天里说 `/任务 帮我调研一下本地TTS方案并写份笔记`，或她自己判断请求复杂时调用
+`start_task` 工具，就会进入后台任务流程：LLM 先把目标拆成 ≤`agent.max_steps`（默认5）
+个步骤并播报计划，然后逐步执行（每步都能用全部工具），做完自我验证——发现哪步没做好
+会自动重做一次，最后给出口语化总结，完整报告存进她的工作区
+`data/workspace/reports/`。`/任务状态` 看进度，`/停止任务` 中止。
+
+保守约束：全局同时只跑一个任务；工作区外的写/删在任务里同样走审批单（任务不等审批，
+单号写进汇报，你 `/批准` 后生效）；全程 `[CKPT:task_*]` 日志可回查。
 
 ### 本地文件访问（三层权限 + 审批流）
 

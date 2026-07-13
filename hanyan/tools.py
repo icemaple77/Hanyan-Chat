@@ -53,13 +53,23 @@ TOOL_SPEC = (
     "github_search{query} 搜开源项目｜get_time{} 查时间｜"
     "fs_list{path} 列目录｜fs_read{path} 读文件｜"
     "fs_write{path,content} 写文件｜fs_delete{path} 删文件"
-    "（工作区 data/workspace 外的写/删会生成审批单，需用户 /批准，要如实转达单号）。\n"
+    "（工作区 data/workspace 外的写/删会生成审批单，需用户 /批准，要如实转达单号）｜"
+    "start_task{goal} 把复杂的多步骤请求交给后台任务执行（会自动拆步骤、边做边汇报）。\n"
     "结果以【工具结果】给你，之后用角色口吻回复，不要向用户提“工具”二字；"
     "不需要就直接正常回复。"
 )
 
 # 模型输出里的工具调用匹配：<tool>{...}</tool>，容忍前后空白和代码块包裹
 _TOOL_PATTERN = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
+
+# start_task 的启动器由 bot 注册（tools 不 import bot，避免循环依赖）
+_task_starter = None
+
+
+def set_task_starter(fn):
+    """bot 启动时注入：fn(user_id, goal) -> str（立即返回的确认文案）。"""
+    global _task_starter
+    _task_starter = fn
 
 
 def parse_tool_call(reply: str) -> Optional[tuple[str, dict]]:
@@ -117,6 +127,10 @@ def execute(name: str, args: dict, user_id: str = "") -> dict:
             now = datetime.now()
             weekdays = "一二三四五六日"
             return {"text": now.strftime(f"%Y年%m月%d日 星期{weekdays[now.weekday()]} %H:%M:%S")}
+        if name == "start_task":
+            if _task_starter is None:
+                return {"text": "（任务执行器还没就绪）"}
+            return {"text": _task_starter(user_id, str(args.get("goal", ""))[:300])}
         return {"text": f"（没有叫 {name} 的工具）"}
     except Exception as e:
         logger.warning("[CKPT:tool_error] %s failed: %s", name, e, exc_info=True)

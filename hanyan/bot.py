@@ -24,7 +24,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from . import commands, config, emotion, evolution, links, llm_client, memory, messaging, stt_client, tools, tts_client
+from . import agent, commands, config, emotion, evolution, links, llm_client, memory, messaging, stt_client, tools, tts_client
 from .character import get_manager as get_character_manager
 from .matrix_client import MatrixClient
 from .reminders import ReminderSystem
@@ -113,6 +113,11 @@ class HanyanBot:
         self._emoji_enabled = True
         self._emoji_probability = 40  # %
 
+        # 任务执行层：多步任务的规划/执行/验证。send 回调把消息从后台线程
+        # 丢回主事件循环发出去；start_task 工具由这里注册进 tools。
+        self.task_runner = agent.TaskRunner(self.router, self._send_text_from_thread)
+        tools.set_task_starter(self._start_task_from_tool)
+
         self._running = False
 
     # ── 给 commands.py 用的接口 ──────────────────────────────────
@@ -131,6 +136,21 @@ class HanyanBot:
 
     def set_auto_message_enabled(self, enabled: bool):
         self._auto_message_enabled = enabled
+
+    def _send_text_from_thread(self, room_id: str, text: str):
+        """线程安全的发消息（任务执行器等后台线程用）。"""
+        if not self._loop:
+            logger.warning("Cannot send from thread: event loop not ready")
+            return
+        fut = asyncio.run_coroutine_threadsafe(self.matrix.send_text(room_id, text), self._loop)
+        fut.result(timeout=30)
+
+    def _start_task_from_tool(self, user_id: str, goal: str) -> str:
+        """start_task 工具入口：从 session 找到用户所在房间后启动任务。"""
+        session = self.session_manager.get(user_id)
+        if not session or session.room_id == "webui":
+            return "（找不到你的聊天房间，暂时没法后台执行任务）"
+        return self.task_runner.start(user_id, session.room_id, session.character_name, goal)
 
     # ── STT：语音转文字回调（跑在线程池里，同步函数）──────────────
 
