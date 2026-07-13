@@ -21,7 +21,9 @@ from datetime import datetime
 
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
 
-from . import config, evolution, llm_client, memory, messaging, tools
+import tempfile
+
+from . import config, evolution, llm_client, memory, messaging, stt_client, tools, tts_client
 from .character import get_manager as get_character_manager
 
 logger = logging.getLogger("hanyan.webui")
@@ -354,16 +356,9 @@ def chat_state():
     return jsonify({"user_id": user_id, "character": character_name, "history": history})
 
 
-@app.route("/api/chat/send", methods=["POST"])
-@login_required
-def chat_send():
-    text = (request.get_json(silent=True) or {}).get("text", "").strip()
-    if not text:
-        return jsonify({"error": "empty"}), 400
-    user_id = _chat_user_id()
-    character_name = config.get_character_for_user(user_id)
-
-    # 组装和 bot._on_message 一致的上下文：角色 + 核心记忆 + 动态上下文 + 工具说明 + 滚动记忆
+def _build_chat_messages(user_id: str, character_name: str, text: str, with_tools: bool = True) -> list[dict]:
+    """组装和 bot._on_message 一致的上下文：角色 + 核心记忆 + 动态上下文 +
+    工具说明（可关，通话模式为压延迟不带工具）+ 滚动记忆。"""
     char = get_character_manager().get(character_name) or get_character_manager().current
     msgs = []
     if char:
@@ -374,21 +369,35 @@ def chat_send():
     dyn = evolution.build_context_block(user_id, character_name)
     if dyn:
         msgs.append({"role": "system", "content": dyn})
-    if config.get("tools.enabled", True):
+    if with_tools and config.get("tools.enabled", True):
         msgs.append({"role": "system", "content": tools.TOOL_SPEC})
     msgs.extend(memory.load_memory(user_id, character_name)[-20:])
     msgs.append({"role": "user", "content": text})
+    return msgs
 
-    if _bot:
-        router = _bot.router
-        # 共用内存态 session：网页发言也算"用户活跃"，主动消息不会误触发；
-        # 不覆盖已有 session 的 Matrix room_id
-        sess = _bot.session_manager.get(user_id) or _bot.session_manager.get_or_create(user_id, "webui")
-        sess.last_active = time.time()
-        sess.add_message("user", text)
-    else:
-        router = llm_client.get_router()
-        sess = None
+
+def _touch_session(user_id: str, text: str):
+    """共用内存态 session：网页发言也算"用户活跃"，主动消息不会误触发；
+    不覆盖已有 session 的 Matrix room_id。返回 session 或 None。"""
+    if not _bot:
+        return None
+    sess = _bot.session_manager.get(user_id) or _bot.session_manager.get_or_create(user_id, "webui")
+    sess.last_active = time.time()
+    sess.add_message("user", text)
+    return sess
+
+
+@app.route("/api/chat/send", methods=["POST"])
+@login_required
+def chat_send():
+    text = (request.get_json(silent=True) or {}).get("text", "").strip()
+    if not text:
+        return jsonify({"error": "empty"}), 400
+    user_id = _chat_user_id()
+    character_name = config.get_character_for_user(user_id)
+    msgs = _build_chat_messages(user_id, character_name, text)
+    router = _bot.router if _bot else llm_client.get_router()
+    sess = _touch_session(user_id, text)
 
     reply, tool_images = tools.chat_loop(router, msgs, user_id, character_name)
     reply = tools.strip_tool_calls(reply) or reply or "[嗯，我现在有点累，稍后再聊好吗？]"
@@ -414,16 +423,93 @@ def chat_send():
 @app.route("/chat/media")
 @login_required
 def chat_media():
-    """受限的本地图片服务：只允许项目内 emojis/ 和 data/downloads/ 下的文件。"""
+    """受限的本地媒体服务：只允许 emojis/、data/downloads/、data/tts_output/。"""
     rel = request.args.get("p", "")
     real = os.path.realpath(os.path.join(config.ROOT_DIR, rel))
     allowed = (
         os.path.realpath(os.path.join(config.ROOT_DIR, "emojis")),
         os.path.realpath(os.path.join(config.ROOT_DIR, "data", "downloads")),
+        os.path.realpath(os.path.join(config.ROOT_DIR, "data", "tts_output")),
     )
     if not any(real.startswith(a + os.sep) for a in allowed) or not os.path.isfile(real):
         abort(404)
     return send_file(real)
+
+
+# ── 语音通话（免提轮流对话：浏览器VAD → STT → LLM → TTS → 自动播放循环）──
+
+_AUDIO_SUFFIX = {"audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a",
+                 "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/x-m4a": ".m4a"}
+
+
+@app.route("/call")
+@login_required
+def call_page():
+    return render_template_string(_CALL_TEMPLATE)
+
+
+@app.route("/api/call/turn", methods=["POST"])
+@login_required
+def call_turn():
+    """一轮通话：收浏览器录音 → STT → LLM（默认不带工具，压延迟）→ TTS。"""
+    f = request.files.get("audio")
+    if f is None:
+        return jsonify({"error": "no audio"}), 400
+    mime = (f.mimetype or "audio/webm").split(";")[0].strip().lower()
+    suffix = _AUDIO_SUFFIX.get(mime, ".webm")
+
+    stt = _bot.stt if _bot else stt_client.get_client()
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+            f.save(tf)
+            tmp_path = tf.name
+        text = (stt.transcribe(tmp_path) or "").strip()
+    except Exception as e:
+        logger.warning("[CKPT:call_stt_fail] %s", e)
+        text = ""
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    if not text:
+        return jsonify({"you": "", "reply": "", "audio": None})  # 没听清，前端继续听
+
+    user_id = _chat_user_id()
+    character_name = config.get_character_for_user(user_id)
+    with_tools = bool(config.get("webui.call_tools", False))
+    msgs = _build_chat_messages(user_id, character_name, text, with_tools=with_tools)
+    msgs.append({"role": "system", "content": "（现在是语音通话，回复要口语化、简短，一两句为宜，不要用括号动作和表情符号）"})
+    router = _bot.router if _bot else llm_client.get_router()
+    sess = _touch_session(user_id, text)
+
+    if with_tools:
+        reply, _ = tools.chat_loop(router, msgs, user_id, character_name)
+    else:
+        reply = router.chat(msgs, purpose="chat")
+    reply = tools.strip_tool_calls(reply or "") or "嗯…信号好像不太好，你再说一遍？"
+    # 通话口语化：把消息模板的断句标记还原成自然停顿
+    speak_text = " ".join(
+        c for t, c in messaging.split_reply(reply) if t == "text" and c
+    ) or reply
+
+    if sess:
+        sess.add_message("assistant", reply)
+    memory.append_memory(user_id, character_name, text, reply)
+
+    audio_url = None
+    try:
+        tts = _bot.tts if _bot else tts_client.get_client()
+        audio_path = tts.synthesize(speak_text)
+        if audio_path:
+            audio_url = "/chat/media?p=" + os.path.relpath(audio_path, config.ROOT_DIR)
+    except Exception as e:
+        logger.warning("[CKPT:call_tts_fail] %s", e)
+
+    logger.info("[CKPT:call_turn] you=%.30s reply=%.30s audio=%s", text, speak_text, bool(audio_url))
+    return jsonify({"you": text, "reply": speak_text, "audio": audio_url})
 
 
 def run_embedded(bot):
@@ -472,6 +558,7 @@ _LOGIN_TEMPLATE = _BASE_STYLE + """
 _NAV = """
 <nav>
   <a href="{{ url_for('chat_page') }}">聊天</a>
+  <a href="{{ url_for('call_page') }}">通话</a>
   <a href="{{ url_for('models_page') }}">模型</a>
   <a href="{{ url_for('index') }}">配置</a>
   <a href="{{ url_for('list_prompts') }}">角色</a>
@@ -717,6 +804,112 @@ async function test(which){
   const r = await fetch('/api/models/test', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({which})});
   const d = await r.json();
   el.textContent = d.ok ? ('✓ ' + d.message) : ('✗ ' + d.message);
+}
+</script>
+"""
+
+
+_CALL_TEMPLATE = _BASE_STYLE + _NAV + """
+<style>
+  #wrap { max-width:480px; margin:0 auto; text-align:center; padding:24px 16px; }
+  #orb { width:140px; height:140px; border-radius:50%; margin:32px auto; transition:all .3s;
+         background:radial-gradient(circle at 35% 30%, #9b7bc9, #6b4c9a); box-shadow:0 4px 30px rgba(107,76,154,.35); }
+  #orb.listen { animation:pulse 1.6s infinite; }
+  #orb.think  { filter:grayscale(.4); transform:scale(.92); }
+  #orb.speak  { animation:pulse .8s infinite; box-shadow:0 4px 40px rgba(107,76,154,.7); }
+  @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.06)} }
+  #state { color:#666; font-size:15px; min-height:22px; }
+  #btn { font-size:16px; padding:12px 40px; border-radius:28px; margin-top:16px; }
+  #btn.on { background:#c0392b; }
+  #trans { text-align:left; margin-top:24px; max-height:32vh; overflow-y:auto; font-size:13px; }
+  #trans div { padding:4px 0; color:#555; }
+  #trans .u::before { content:"你："; color:#6b4c9a; font-weight:600; }
+  #trans .a::before { content:"她："; color:#b0568c; font-weight:600; }
+</style>
+<div id="wrap">
+  <div id="orb"></div>
+  <div id="state">点下面按钮开始通话</div>
+  <button id="btn" onclick="toggle()">开始通话</button>
+  <div id="trans"></div>
+</div>
+<script>
+let ctx, analyser, recorder, stream, on = false, speaking = false, chunks = [];
+let voiceMs = 0, silenceMs = 0, lastT = 0;
+const THR = 0.015, MIN_VOICE = 400, END_SILENCE = 900;
+const orb = document.getElementById('orb'), st = document.getElementById('state');
+
+function setUI(mode, text) { orb.className = mode; st.textContent = text; }
+function addLine(cls, t) {
+  const d = document.createElement('div'); d.className = cls; d.textContent = t;
+  const box = document.getElementById('trans'); box.prepend(d);
+}
+
+async function toggle() {
+  const btn = document.getElementById('btn');
+  if (on) { on = false; btn.textContent = '开始通话'; btn.className = ''; stopAll(); setUI('', '已挂断'); return; }
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}}); }
+  catch (e) { setUI('', '拿不到麦克风权限：' + e); return; }
+  on = true; btn.textContent = '挂断'; btn.className = 'on';
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = ctx.createAnalyser(); analyser.fftSize = 2048;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  startRec(); lastT = performance.now(); requestAnimationFrame(vad);
+}
+
+function startRec() {
+  chunks = []; voiceMs = 0; silenceMs = 0;
+  const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
+               (MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '');
+  recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+  recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = sendTurn;
+  recorder.start(250);
+  setUI('listen', '听着呢，说吧～');
+}
+
+function vad(now) {
+  if (!on) return;
+  const dt = now - lastT; lastT = now;
+  if (!speaking && recorder && recorder.state === 'recording') {
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0; for (const v of buf) sum += v * v;
+    const rms = Math.sqrt(sum / buf.length);
+    if (rms > THR) { voiceMs += dt; silenceMs = 0; if (voiceMs > 150) setUI('listen', '嗯嗯，在听…'); }
+    else if (voiceMs > MIN_VOICE) { silenceMs += dt; if (silenceMs > END_SILENCE) recorder.stop(); }
+    else { voiceMs = Math.max(0, voiceMs - dt); }
+  }
+  requestAnimationFrame(vad);
+}
+
+async function sendTurn() {
+  if (!on) return;
+  speaking = true; setUI('think', '想想怎么回你…');
+  const blob = new Blob(chunks, {type: recorder.mimeType || 'audio/webm'});
+  const fd = new FormData(); fd.append('audio', blob, 'turn' + (recorder.mimeType.includes('mp4') ? '.m4a' : '.webm'));
+  try {
+    const r = await fetch('/api/call/turn', {method: 'POST', body: fd});
+    const d = await r.json();
+    if (d.you) addLine('u', d.you);
+    if (d.reply) addLine('a', d.reply);
+    if (d.audio) {
+      setUI('speak', '…');
+      const a = new Audio(d.audio);
+      await new Promise(res => { a.onended = res; a.onerror = res; a.play().catch(res); });
+    } else if (d.reply) {
+      setUI('speak', d.reply);
+      await new Promise(res => setTimeout(res, 1200));
+    }
+  } catch (e) { setUI('', '这一轮失败了：' + e); }
+  speaking = false;
+  if (on) startRec();  // 她说完继续听（轮流制，天然避免回声）
+}
+
+function stopAll() {
+  try { recorder && recorder.state !== 'inactive' && recorder.stop(); } catch (e) {}
+  recorder = null;
+  stream && stream.getTracks().forEach(t => t.stop());
+  ctx && ctx.close();
 }
 </script>
 """

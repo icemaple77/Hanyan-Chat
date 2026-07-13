@@ -311,6 +311,20 @@ python webui.py
 
 独立进程运行时聊天退化为共用磁盘记忆（上下文依然连续，但不共享内存态 session）。
 
+#### 语音通话（/call）
+
+「通话」页是免提轮流对话：点开始后浏览器持续听麦克风（本地音量 VAD 检测你说完），
+自动走 STT → LLM → TTS，她的语音播完自动继续听。轮流制天然避免回声（她说话时不收音）。
+通话记忆与文字聊天、Matrix 完全同一份。
+
+- 延迟约 3~6 秒/轮（STT+LLM+TTS 串行），是"对讲机感"而非真电话，后续可做流式优化
+- 默认通话中不启用工具（`webui.call_tools: false`）以压延迟
+- 手机使用：`webui.host` 改成 `0.0.0.0`，手机浏览器访问 `http://<Mac的局域网IP>:5001/call`。
+  注意 iOS Safari 要求 HTTPS 才给麦克风权限（`localhost` 除外），局域网 http 下
+  Android Chrome 可在 `chrome://flags` 的 unsafely-treat-insecure-origin-as-secure
+  加白名单，或给 WebUI 套一层自签 HTTPS/Tailscale
+- 计划中的 APK 即 WebView 包装此页面，管线全复用
+
 默认监听 `127.0.0.1:5001`，登录用户名/密码是 `config.json` 里的 `webui.username`/
 `webui.password`。可以：
 - 直接编辑整份 `config.json`（保存时自动和默认值深度合并）
