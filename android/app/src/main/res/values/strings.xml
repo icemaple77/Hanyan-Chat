@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">含烟</string>
+    <string name="server_url">服务器地址</string>
+    <string name="server_url_hint">填你反代到 Hanyan WebUI 的域名（需 https，语音通话才拿得到麦克风权限）</string>
+    <string name="reload">刷新页面</string>
+</resources>

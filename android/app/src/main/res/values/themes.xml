@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Hanyan" parent="Theme.AppCompat.DayNight">
+        <item name="colorPrimary">#6B4C9A</item>
+        <item name="colorPrimaryDark">#523A78</item>
+        <item name="colorAccent">#B0568C</item>
+    </style>
+</resources>

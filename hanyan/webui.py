@@ -30,6 +30,11 @@ logger = logging.getLogger("hanyan.webui")
 
 app = Flask(__name__)
 app.secret_key = config.get("webui.secret_key", "change-this-secret-key")
+# 挂在 https 域名后面（nginx 反代）时置 true：登录 cookie 只走 https，防明文泄露
+if config.get("webui.behind_https", False):
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 _FORUM_DIR = os.path.join(config.ROOT_DIR, "data", "forum")
 

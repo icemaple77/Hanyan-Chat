@@ -311,6 +311,10 @@ python webui.py
 
 独立进程运行时聊天退化为共用磁盘记忆（上下文依然连续，但不共享内存态 session）。
 
+默认监听 `127.0.0.1:5001`，登录用户名/密码是 `config.json` 里的 `webui.username`/
+`webui.password`。功能：整份配置编辑（保存自动深度合并）、角色提示词管理、记忆查看/
+删除、模型配置、简易动态墙。对外访问方案见下方「对外发布」。
+
 #### 语音通话（/call）
 
 「通话」页是免提轮流对话：点开始后浏览器持续听麦克风（本地音量 VAD 检测你说完），
@@ -323,18 +327,71 @@ python webui.py
   注意 iOS Safari 要求 HTTPS 才给麦克风权限（`localhost` 除外），局域网 http 下
   Android Chrome 可在 `chrome://flags` 的 unsafely-treat-insecure-origin-as-secure
   加白名单，或给 WebUI 套一层自签 HTTPS/Tailscale
-- 计划中的 APK 即 WebView 包装此页面，管线全复用
+- Android App 即 WebView 包装此页面（见下方「手机 App」），管线全复用
 
-默认监听 `127.0.0.1:5001`，登录用户名/密码是 `config.json` 里的 `webui.username`/
-`webui.password`。可以：
-- 直接编辑整份 `config.json`（保存时自动和默认值深度合并）
-- 新建/编辑/删除角色提示词
-- 查看/删除记忆文件（滚动记忆 + 核心记忆）
-- 简易动态墙（发帖 + 点赞，每个角色一个独立的动态列表）
+## 对外发布（域名 + nginx 反代）
 
-如果要在局域网/公网访问，把 `webui.host` 改成 `0.0.0.0` 前**务必**把 `webui.password`
-和 `webui.secret_key` 改成强随机值（不要用默认的 `CHANGE_ME`），最好再套一层反向代理
-+ HTTPS。
+想在外网/手机上用（尤其语音通话——WebView 的 getUserMedia **只在 https 下放行**），
+给 WebUI 套一层 nginx HTTPS 反代即可。Flask 保持只听本机（`webui.host: 127.0.0.1`），
+外面全部由 nginx 接：
+
+```nginx
+# /etc/nginx/conf.d/hanyan.conf
+server {
+    listen 443 ssl http2;
+    server_name hanyan.example.com;          # 换成你的域名
+
+    ssl_certificate     /etc/letsencrypt/live/hanyan.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hanyan.example.com/privkey.pem;
+
+    client_max_body_size 20m;                # 通话录音分片上传
+
+    location / {
+        proxy_pass http://127.0.0.1:5001;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 300s;             # LLM 生成 + TTS 合成可能较久
+        proxy_send_timeout 300s;
+    }
+}
+
+server {
+    listen 80;
+    server_name hanyan.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+配好后 `config.json` 里做三件事：
+
+1. `webui.behind_https: true` — 登录 cookie 加 Secure/HttpOnly 标记
+2. `webui.password` 换成强密码、`webui.secret_key` 换成长随机串——这个页面
+   能改配置、能读记忆、能批准文件操作，**等于 bot 的管理后台**，暴露公网前必须换
+3. `webui.host` 保持 `127.0.0.1`（nginx 和 bot 同机时不要开 0.0.0.0）
+
+可选加固：nginx 层再加一层 `auth_basic`、fail2ban 盯 `/login`、或干脆走
+Tailscale/WireGuard 不暴露公网。证书用 certbot：`certbot --nginx -d hanyan.example.com`。
+
+## 手机 App（Android）
+
+`android/` 是一个极简 WebView 壳工程：加载你反代出来的 WebUI 域名，桥接麦克风
+权限给 `/call` 通话页，Cookie 持久化保持登录态，通话时屏幕常亮。服务器地址
+首次启动时填（右上角菜单可改）。
+
+构建：
+
+```bash
+# 方式一：Android Studio 打开 android/ 目录 → Build → Build APK(s)
+# 方式二：命令行（需要 Android SDK）
+cd android && ./gradlew assembleDebug
+# 产物在 android/app/build/outputs/apk/debug/app-debug.apk，直接传手机安装
+```
+
+个人自用装 debug 包即可；想要正式签名包再配 signingConfig。
+注意：服务器地址必须是 **https** 域名，`http://192.168.x.x` 局域网地址在
+WebView 里会被内核拒绝麦克风权限（文字聊天不受影响）。
 
 ## 工具调用与自我进化
 

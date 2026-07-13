@@ -82,8 +82,9 @@
     "password": "CHANGE_ME_OR_SET_HANYAN_WEBUI_PASSWORD_ENV",
     "secret_key": "CHANGE_ME_OR_SET_HANYAN_WEBUI_SECRET_ENV",
     "chat_user_id": "",
-    "_说明": "chat_user_id=网页聊天绑定的Matrix用户(留空自动取最活跃会话);enabled=true时WebUI随bot内嵌启动,网页聊天与Matrix共用会话;call_tools=通话模式是否允许用工具(默认关,压延迟)",
-    "call_tools": false
+    "_说明": "chat_user_id=网页聊天绑定的Matrix用户(留空自动取最活跃会话);enabled=true时WebUI随bot内嵌启动,网页聊天与Matrix共用会话;call_tools=通话模式是否允许用工具(默认关,压延迟);behind_https=true时登录cookie加Secure标记(nginx https反代场景)",
+    "call_tools": false,
+    "behind_https": false
   },
   "tools": {
     "enabled": true,
