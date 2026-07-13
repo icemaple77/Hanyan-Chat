@@ -328,6 +328,19 @@ docker run -d --name searxng -p 8080:8080 searxng/searxng
 # config.json: "tools": {"searxng_url": "http://127.0.0.1:8080"}
 ```
 
+### 本地文件访问（三层权限 + 审批流）
+
+`fs_list` / `fs_read` / `fs_write` / `fs_delete` 四个工具，权限模型（`hanyan/fs_access.py`）：
+
+1. **她的主目录**（`fs.home_dir`，默认 `data/home/`）— 自由读写删，是她自己的空间
+2. **只读范围**（`fs.read_roots`，默认你的家目录）— 只能读文件和列目录
+3. **主目录外的写/删** — 生成审批单，她会在聊天里报编号，你回 `/批准 <编号>` 才执行，
+   `/拒绝 <编号>` 作废，默认 15 分钟过期，`/待批` 查看队列
+
+安全机制：路径先 realpath 解析（防 `../` 和符号链接逃逸）；`.ssh`/密钥/token/
+Keychains 等敏感路径硬编码黑名单，**任何配置都不能放开**（防角色被话术诱导读私钥）；
+单文件读取上限 `fs.max_read_kb`；所有操作记审计日志 `data/fs_audit.log`。
+
 ### 自我进化（只动数据，不动代码）
 
 进化全部发生在 `data/growth/<用户>_<角色>/` 下的数据层，**永远不自动修改代码**：

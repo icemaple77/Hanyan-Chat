@@ -15,7 +15,7 @@ dispatch() 需要一个 "bot" 对象，期望它提供：
 import asyncio
 from typing import Optional
 
-from . import config, evolution, memory, tools
+from . import config, evolution, fs_access, memory, tools
 from .session import Session
 
 COMMAND_ALIASES = {
@@ -30,6 +30,9 @@ COMMAND_ALIASES = {
     "/兴趣": "interests", "/int": "interests",
     "/提案": "proposals", "/pp": "proposals",
     "/清理": "cleanup", "/gc": "cleanup",
+    "/批准": "approve", "/ok": "approve",
+    "/拒绝": "reject", "/no": "reject",
+    "/待批": "pending", "/pd": "pending",
     "/帮助": "help", "/help": "help",
 }
 
@@ -46,6 +49,9 @@ HELP_TEXT = (
     "/兴趣 或 /int — 看看她最近对什么感兴趣\n"
     "/提案 或 /pp — 查看她收集的功能提案（GitHub 调研归档）\n"
     "/清理 或 /gc — 立刻清理过期的下载缓存\n"
+    "/批准 <编号> 或 /ok <编号> — 批准她的文件操作申请\n"
+    "/拒绝 <编号> 或 /no <编号> — 拒绝申请\n"
+    "/待批 或 /pd — 查看待批准的文件操作\n"
     "/帮助 或 /help — 显示这份帮助"
 )
 
@@ -120,6 +126,16 @@ async def dispatch(bot, session: Session, room_id: str, sender: str, text: str) 
     elif action == "cleanup":
         removed = tools.cleanup_downloads(0)  # 0 = 全部临时下载立即清
         reply = f"清理完成，删掉了 {removed} 个缓存文件。"
+    elif action in ("approve", "reject"):
+        try:
+            pid = int(arg)
+        except ValueError:
+            reply = f"用法：/{'批准' if action == 'approve' else '拒绝'} <审批单编号>（/待批 可以看编号）"
+        else:
+            fn = fs_access.approve if action == "approve" else fs_access.reject
+            reply = await asyncio.get_event_loop().run_in_executor(None, fn, pid, sender)
+    elif action == "pending":
+        reply = fs_access.list_pending()
     elif action == "help":
         reply = HELP_TEXT
 

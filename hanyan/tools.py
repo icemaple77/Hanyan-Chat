@@ -29,7 +29,7 @@ import urllib.request
 from datetime import datetime
 from typing import Optional
 
-from . import config, links
+from . import config, fs_access, links
 from .emotion import EMOTION_FOLDER_MAP
 
 logger = logging.getLogger("hanyan.tools")
@@ -55,8 +55,14 @@ TOOL_SPEC = (
     "填了就把这张图收藏进你的表情包库以后也能用\n"
     '- github_search {"query":"…"} 搜 GitHub 开源项目\n'
     '- get_time {} 查看现在的日期时间\n'
+    '- fs_list {"path":"…"} 列出本机某个目录的内容（只读）\n'
+    '- fs_read {"path":"…"} 读取本机某个文件的内容（只读）\n'
+    '- fs_write {"path":"…","content":"…"} 写文件。你的主目录（data/home）内直接生效；'
+    "主目录外会生成审批单，需要用户 /批准 后才执行\n"
+    '- fs_delete {"path":"…"} 删除文件，审批规则同 fs_write\n'
     "工具结果会以【工具结果】发给你，看完后用你的角色口吻自然地回复用户，"
     "不要向用户提及“工具”这个词。不需要工具时就直接正常回复。"
+    "涉及文件操作时要如实转达审批单编号。"
 )
 
 # 模型输出里的工具调用匹配：<tool>{...}</tool>，容忍前后空白和代码块包裹
@@ -86,11 +92,23 @@ def strip_tool_calls(reply: str) -> str:
     return _TOOL_PATTERN.sub("", reply or "").strip()
 
 
-def execute(name: str, args: dict) -> dict:
+def execute(name: str, args: dict, user_id: str = "") -> dict:
     """执行工具。返回 {"text": 给模型看的结果文本, "image": 可选的本地图片路径}。
     任何异常都被捕获并转成文字结果，绝不让工具错误冒泡打断聊天流程。"""
     logger.info("[CKPT:tool_exec] %s args=%s", name, json.dumps(args, ensure_ascii=False)[:200])
     try:
+        if name.startswith("fs_"):
+            if not config.get("fs.enabled", True):
+                return {"text": "（文件系统访问功能已被关闭）"}
+            path = str(args.get("path", ""))
+            if name == "fs_list":
+                return {"text": fs_access.fs_list(path)}
+            if name == "fs_read":
+                return {"text": fs_access.fs_read(path)}
+            if name == "fs_write":
+                return {"text": fs_access.fs_write(path, str(args.get("content", "")), user_id)}
+            if name == "fs_delete":
+                return {"text": fs_access.fs_delete(path, user_id)}
         if name == "web_search":
             return {"text": _web_search(str(args.get("query", ""))[:100])}
         if name == "fetch_url":

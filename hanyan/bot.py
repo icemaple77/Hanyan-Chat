@@ -264,7 +264,7 @@ class HanyanBot:
                 return reply or "", tool_images
 
             name, args = call
-            result = await loop.run_in_executor(None, tools.execute, name, args)
+            result = await loop.run_in_executor(None, tools.execute, name, args, sender)
             if result.get("image"):
                 tool_images.append(result["image"])
             if name == "github_search" and result.get("text"):
