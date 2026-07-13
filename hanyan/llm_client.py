@@ -17,13 +17,17 @@ logger = logging.getLogger("hanyan.llm")
 
 
 class LLMClient:
-    """本地/远程 LLM 聊天客户端（Ollama 协议 或 OpenAI 兼容协议，自动判断）。"""
+    """本地/远程 LLM 聊天客户端（Ollama 协议 或 OpenAI 兼容协议，自动判断）。
 
-    def __init__(self):
+    cfg_key 指定读取哪段配置：默认 "llm"（本地主模型），传 "llm.cloud"
+    则加载云端备用模型（DeepSeek/SiliconFlow 等 OpenAI 兼容网关）。"""
+
+    def __init__(self, cfg_key: str = "llm"):
+        self._cfg_key = cfg_key
         self._load_config()
 
     def _load_config(self):
-        cfg = config.get("llm")
+        cfg = config.get(self._cfg_key) or {}
         self.base_url = cfg.get("base_url", "http://localhost:11434").rstrip("/")
         self.model = cfg.get("model", "qwen3:8b")
         self.temperature = cfg.get("temperature", 0.7)
@@ -173,13 +177,57 @@ class LLMClient:
             return False
 
 
+FALLBACK_REPLY = "[嗯，我现在有点累，稍后再聊好吗？]"
+
+
 def _fallback_reply() -> str:
     """LLM 不可用时的降级回复。"""
-    return "[嗯，我现在有点累，稍后再聊好吗？]"
+    return FALLBACK_REPLY
+
+
+class LLMRouter:
+    """双模型路由：本地模型为主，云端模型（llm.cloud）按用途启用 + 互为 fallback。
+
+    purpose 取值：
+    - "chat"       日常对话（默认本地，省 token）
+    - "tools"      工具调用决策（小模型容易格式跑偏，默认优先云端——如果配置了）
+    - "reflection" 自我反思/摘要（低频、质量敏感，默认优先云端——如果配置了）
+
+    路由规则可在 config 里覆盖：llm.cloud.use_for = ["tools", "reflection"]。
+    任一侧失败自动切换另一侧，日志打 [CKPT:llm_fallback] 方便自查。
+    没配 llm.cloud.base_url 时行为与单模型完全一致。
+    """
+
+    def __init__(self):
+        self.local = LLMClient()
+        self.cloud: Optional[LLMClient] = None
+        if config.get("llm.cloud.base_url", ""):
+            self.cloud = LLMClient("llm.cloud")
+            logger.info("Cloud LLM enabled: %s (%s)", self.cloud.model, self.cloud.base_url)
+
+    def reload_config(self):
+        self.local.reload_config()
+        if self.cloud:
+            self.cloud.reload_config()
+
+    def chat(self, messages: list[dict], temperature: Optional[float] = None, purpose: str = "chat") -> Optional[str]:
+        cloud_purposes = config.get("llm.cloud.use_for", ["tools", "reflection"]) or []
+        prefer_cloud = self.cloud is not None and purpose in cloud_purposes
+        primary, secondary = (self.cloud, self.local) if prefer_cloud else (self.local, self.cloud)
+
+        reply = primary.chat(messages, temperature=temperature)
+        if reply != FALLBACK_REPLY or secondary is None:
+            return reply
+        logger.warning(
+            "[CKPT:llm_fallback] %s model failed for purpose=%s, retrying with %s",
+            "cloud" if prefer_cloud else "local", purpose, "local" if prefer_cloud else "cloud",
+        )
+        return secondary.chat(messages, temperature=temperature)
 
 
 # 全局单例
 _client: Optional[LLMClient] = None
+_router: Optional[LLMRouter] = None
 
 
 def get_client() -> LLMClient:
@@ -187,3 +235,10 @@ def get_client() -> LLMClient:
     if _client is None:
         _client = LLMClient()
     return _client
+
+
+def get_router() -> LLMRouter:
+    global _router
+    if _router is None:
+        _router = LLMRouter()
+    return _router

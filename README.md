@@ -26,6 +26,9 @@
 | TTS 语音回复 | 调用本地 TTS 网关，WAV 自动压 OGG（Matrix 语音气泡） | `hanyan/tts_client.py` |
 | **STT 语音输入（新）** | 本地 whisper-mlx 转写用户发来的语音消息，转完直接进普通聊天流程 | `hanyan/stt_client.py` |
 | WebUI | 配置编辑 / 角色编辑 / 记忆查看 / 极简动态（发帖+点赞） | `hanyan/webui.py` |
+| **工具调用（新）** | 角色可自主搜网页/读链接/搜图/下载图片和表情包/搜 GitHub/查时间 | `hanyan/tools.py` |
+| **自我进化（新）** | 每日自我反思更新成长档案，兴趣随聊天演化，表情包库自动扩充，带检查点回溯 | `hanyan/evolution.py` |
+| **双模型路由（新）** | 本地模型为主 + 云端（DeepSeek 等）按用途启用，双向 fallback 省 token | `hanyan/llm_client.py` |
 
 ### 和 KouriChat 原版的差异
 
@@ -306,6 +309,48 @@ python webui.py
 如果要在局域网/公网访问，把 `webui.host` 改成 `0.0.0.0` 前**务必**把 `webui.password`
 和 `webui.secret_key` 改成强随机值（不要用默认的 `CHANGE_ME`），最好再套一层反向代理
 + HTTPS。
+
+## 工具调用与自我进化
+
+### 工具调用
+
+`tools.enabled: true` 时，每轮对话会给模型注入工具说明，模型输出
+`<tool>{"name":"web_search","args":{"query":"…"}}</tool>` 即触发执行，结果喂回后
+继续生成（单轮最多 `tools.max_calls_per_turn` 次，防死循环）。可用工具：
+`web_search`、`fetch_url`、`search_images`、`download_image`（可顺带收藏进表情包库）、
+`github_search`、`get_time`。当前时间同时每轮注入 system prompt，她随时知道现在几点。
+
+搜索后端默认 DuckDuckGo（免 key）。想要更稳、支持图片搜索、反 robot 检测，自建一个
+SearXNG 然后配 `tools.searxng_url`：
+
+```bash
+docker run -d --name searxng -p 8080:8080 searxng/searxng
+# config.json: "tools": {"searxng_url": "http://127.0.0.1:8080"}
+```
+
+### 自我进化（只动数据，不动代码）
+
+进化全部发生在 `data/growth/<用户>_<角色>/` 下的数据层，**永远不自动修改代码**：
+
+- `profile.md` — 成长档案。每天过了 `evolution.reflect_hour`（默认 4 点）自动做一次
+  自我反思：读最近聊天，第一人称重写"关于他 / 我们的相处 / 我的变化"，每轮对话注入
+  提示词，性格和了解随时间真实演化。`/反思` 可手动触发。
+- `interests.json` — 兴趣清单。反思时提取，旧兴趣按 0.85/天衰减、低于 0.2 淘汰，
+  兴趣会自然转移；主动消息会聊"最近在研究的东西"。`/兴趣` 查看。
+- `proposals.md` — 功能提案。她用 `github_search` 调研到的项目自动归档，想要的新能力
+  写在这里**由人审核决定是否实施**（不自动合并代码——那是安全边界）。`/提案` 查看。
+- 表情包库 — `download_image` 带 `emotion` 参数时图片存进 `emojis/<情绪>/`，越用越丰富。
+
+**看门狗与回溯**：所有档案写入都走"备份 → 写临时文件 → 校验 → 原子替换"，校验失败
+自动还原 `.bak` 备份；关键路径日志统一带 `[CKPT:*]` 标记（`grep CKPT data/hanyan.log`
+即可自查全链路），进化文件出问题可手动从同目录 `.bak` 恢复。
+
+### 双模型路由
+
+`llm.cloud.base_url` 配了云端模型（OpenAI 兼容，DeepSeek/SiliconFlow 均可）后：
+`use_for` 里的用途（默认 `tools` 工具决策 + `reflection` 反思摘要，低频但吃理解力）
+优先走云端，日常聊天仍走本地省 token；任一侧失败自动切另一侧
+（日志 `[CKPT:llm_fallback]`）。不配则纯本地，行为不变。
 
 ## Matrix 服务端（Synapse）配置要点
 

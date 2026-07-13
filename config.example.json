@@ -11,7 +11,18 @@
     "temperature": 0.7,
     "timeout": 60,
     "api_key": "",
-    "think": false
+    "think": false,
+    "cloud": {
+      "base_url": "",
+      "api_key": "",
+      "model": "deepseek-chat",
+      "timeout": 60,
+      "use_for": [
+        "tools",
+        "reflection"
+      ],
+      "_说明": "云端备用模型(OpenAI兼容,如DeepSeek/SiliconFlow)。base_url留空=纯本地。use_for指定哪些用途优先走云端,其余走本地省token,双向fallback"
+    }
   },
   "tts": {
     "enabled": true,
@@ -69,5 +80,18 @@
     "username": "admin",
     "password": "CHANGE_ME_OR_SET_HANYAN_WEBUI_PASSWORD_ENV",
     "secret_key": "CHANGE_ME_OR_SET_HANYAN_WEBUI_SECRET_ENV"
+  },
+  "tools": {
+    "enabled": true,
+    "searxng_url": "",
+    "max_calls_per_turn": 3,
+    "max_image_mb": 5,
+    "download_max_age_days": 7,
+    "_说明": "searxng_url留空用DuckDuckGo;配自建SearXNG后搜索质量更好且支持图片搜索"
+  },
+  "evolution": {
+    "enabled": true,
+    "reflect_hour": 4,
+    "_说明": "每日自我反思(成长档案+兴趣演化),reflect_hour=过了几点后执行"
   }
 }

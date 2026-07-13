@@ -24,7 +24,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from . import commands, config, emotion, links, llm_client, memory, messaging, stt_client, tts_client
+from . import commands, config, emotion, evolution, links, llm_client, memory, messaging, stt_client, tools, tts_client
 from .character import get_manager as get_character_manager
 from .matrix_client import MatrixClient
 from .reminders import ReminderSystem
@@ -69,6 +69,18 @@ def setup_logging():
 _REMINDER_KEYWORDS = ["提醒", "提醒我", "分钟后", "小时后", "定时", "每天", "每日", "叫我", "叫我起床"]
 
 
+class _RouterAsChat:
+    """把 LLMRouter 适配成 LLMClient.chat 的签名（固定 purpose），
+    给 evolution.reflect / memory 摘要这类只认 .chat() 接口的模块用。"""
+
+    def __init__(self, router, purpose: str):
+        self._router = router
+        self._purpose = purpose
+
+    def chat(self, messages, temperature=None, **kwargs):
+        return self._router.chat(messages, temperature=temperature, purpose=self._purpose)
+
+
 class HanyanBot:
     """Hanyan Chat 主程序。"""
 
@@ -76,6 +88,7 @@ class HanyanBot:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.matrix = MatrixClient()
         self.llm = llm_client.get_client()
+        self.router = llm_client.get_router()  # 本地+云端双模型路由（云端未配置时等价单模型）
         self.tts = tts_client.get_client()
         self.stt = stt_client.get_client()
         self.char_mgr = get_character_manager()
@@ -168,6 +181,12 @@ class HanyanBot:
         core_block = memory.format_core_memory_for_prompt(core_memories)
         if core_block:
             messages.append({"role": "system", "content": core_block})
+        # 动态上下文：当前时间 + 成长档案 + 近期兴趣（自我进化的注入点）
+        dyn_block = evolution.build_context_block(sender, character_name)
+        if dyn_block:
+            messages.append({"role": "system", "content": dyn_block})
+        if config.get("tools.enabled", True):
+            messages.append({"role": "system", "content": tools.TOOL_SPEC})
 
         max_history = 20
         if memories:
@@ -185,11 +204,12 @@ class HanyanBot:
             return
 
         try:
-            reply = await asyncio.get_event_loop().run_in_executor(None, lambda: self.llm.chat(messages))
+            reply, tool_images = await self._chat_with_tools(messages, sender, character_name)
         except Exception as e:
             logger.error("LLM chat error for %s: %s", sender, e, exc_info=True)
-            reply = "[嗯，我现在有点累，稍后再聊好吗？]"
+            reply, tool_images = "[嗯，我现在有点累，稍后再聊好吗？]", []
 
+        reply = tools.strip_tool_calls(reply) or reply
         if not reply:
             reply = "[嗯，我现在有点累，稍后再聊好吗？]"
 
@@ -209,11 +229,62 @@ class HanyanBot:
 
         await self._send_actions(room_id, actions, was_voice)
 
+        # 工具下载的图片（表情包/图片）随回复发出
+        for img in tool_images:
+            try:
+                await self.matrix.send_image(room_id, img)
+            except Exception as e:
+                logger.warning("Failed to send tool image: %s", e)
+
         if emoji_path:
             try:
                 await self.matrix.send_image(room_id, emoji_path)
             except Exception as e:
                 logger.warning("Failed to send emoji: %s", e)
+
+    async def _chat_with_tools(self, messages: list[dict], sender: str, character_name: str) -> tuple[str, list[str]]:
+        """带工具调用循环的 LLM 对话。
+
+        模型输出 <tool>{...}</tool> 时执行工具、把结果喂回去再生成，最多
+        tools.max_calls_per_turn 轮，防止死循环。github_search 的结果自动归档
+        进提案文件（自我进化：她研究到的开源项目留给人审核吸收）。
+        返回 (最终回复, 工具下载的图片路径列表)。"""
+        loop = asyncio.get_event_loop()
+        tool_images: list[str] = []
+        tools_enabled = config.get("tools.enabled", True)
+        max_calls = int(config.get("tools.max_calls_per_turn", 3))
+        purpose = "chat"
+
+        for _ in range(max_calls + 1):
+            reply = await loop.run_in_executor(
+                None, lambda m=list(messages), p=purpose: self.router.chat(m, purpose=p)
+            )
+            call = tools.parse_tool_call(reply) if tools_enabled else None
+            if not call:
+                return reply or "", tool_images
+
+            name, args = call
+            result = await loop.run_in_executor(None, tools.execute, name, args)
+            if result.get("image"):
+                tool_images.append(result["image"])
+            if name == "github_search" and result.get("text"):
+                evolution.append_proposal(sender, character_name, f"github_search: {args.get('query', '')}", result["text"])
+
+            messages.append({"role": "assistant", "content": reply})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"【工具结果】\n{result['text']}\n"
+                    "（基于结果继续。若还需要别的工具可再调用一次，否则请用你的角色口吻回复用户，不要提到工具。）"
+                ),
+            })
+            purpose = "tools"  # 后续轮次按工具用途路由（配置了云端则优先云端）
+
+        # 超出工具轮数上限，强制收尾
+        logger.info("[CKPT:tool_limit] max tool calls reached, forcing final reply")
+        messages.append({"role": "user", "content": "（不要再调用工具了，直接用角色口吻回复用户。）"})
+        reply = await loop.run_in_executor(None, lambda: self.router.chat(messages, purpose="chat"))
+        return reply or "", tool_images
 
     async def _send_actions(self, room_id: str, actions: list[tuple[str, str]], was_voice: bool = False):
         """把 split_reply() 输出的动作序列发送出去（文字/拍一拍/撤回）。
@@ -367,6 +438,7 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
             try:
                 if time.time() - last_evict >= 3600:
                     self.session_manager.evict_idle()
+                    tools.cleanup_downloads(config.get("tools.download_max_age_days", 7))
                     last_evict = time.time()
 
                 if not self._auto_message_enabled:
@@ -428,6 +500,10 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
         chat_messages = []
         if character:
             chat_messages.append(character.system_message())
+        # 主动消息也带上时间/成长档案/兴趣——她可以聊"最近在研究的东西"
+        dyn_block = evolution.build_context_block(session.user_id, session.character_name)
+        if dyn_block:
+            chat_messages.append({"role": "system", "content": dyn_block})
         chat_messages.extend(session.messages[-4:])
 
         prompt_text = random.choice([
@@ -482,7 +558,8 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
     # ── 记忆管理后台线程 ─────────────────────────────────────────
 
     def _memory_manager_loop(self):
-        """周期性检查各用户滚动记忆是否达到晋升阈值，达到就摘要成核心记忆。"""
+        """周期性检查各用户滚动记忆是否达到晋升阈值，达到就摘要成核心记忆；
+        同时负责每日自我反思（成长档案 + 兴趣演化）的调度。"""
         self._memory_manager_running = True
         interval = 60
         while self._memory_manager_running:
@@ -499,6 +576,22 @@ D) **非提醒请求**：例如 "今天天气怎么样?", "取消提醒"。
                                 memory.summarize_dynamic_memory(self.llm, user_id, session.character_name)
                         except Exception as e:
                             logger.error("Memory promotion failed for %s/%s: %s", user_id, session.character_name, e, exc_info=True)
+
+                # 每日自我反思：过了 reflect_hour（默认凌晨4点）且今天还没反思过就做一次
+                reflect_hour = int(config.get("evolution.reflect_hour", 4))
+                if datetime.now().hour >= reflect_hour:
+                    for session in self.session_manager.all_sessions():
+                        if session.user_id.startswith(("@hermes:", "@serena:")):
+                            continue
+                        try:
+                            if evolution.should_reflect(session.user_id, session.character_name):
+                                logger.info("[CKPT:evo_reflect_start] %s/%s", session.user_id, session.character_name)
+                                evolution.reflect(
+                                    _RouterAsChat(self.router, "reflection"),
+                                    session.user_id, session.character_name,
+                                )
+                        except Exception as e:
+                            logger.error("[CKPT:evo_reflect_error] %s: %s", session.user_id, e, exc_info=True)
                 time.sleep(interval)
             except Exception as e:
                 logger.error("Memory manager loop error: %s", e, exc_info=True)

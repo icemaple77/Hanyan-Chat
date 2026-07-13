@@ -15,7 +15,7 @@ dispatch() 需要一个 "bot" 对象，期望它提供：
 import asyncio
 from typing import Optional
 
-from . import config, memory
+from . import config, evolution, memory, tools
 from .session import Session
 
 COMMAND_ALIASES = {
@@ -26,6 +26,10 @@ COMMAND_ALIASES = {
     "/总结": "summarize", "/ms": "summarize",
     "/切换角色": "switch_character", "/role": "switch_character",
     "/角色列表": "list_characters", "/roles": "list_characters",
+    "/反思": "reflect", "/rf": "reflect",
+    "/兴趣": "interests", "/int": "interests",
+    "/提案": "proposals", "/pp": "proposals",
+    "/清理": "cleanup", "/gc": "cleanup",
     "/帮助": "help", "/help": "help",
 }
 
@@ -38,6 +42,10 @@ HELP_TEXT = (
     "/总结 或 /ms — 立刻把最近聊天整理进长期记忆\n"
     "/切换角色 <角色名> 或 /role <角色名> — 只切换你自己看到的角色\n"
     "/角色列表 或 /roles — 查看有哪些角色\n"
+    "/反思 或 /rf — 立刻做一次自我反思（更新成长档案和兴趣）\n"
+    "/兴趣 或 /int — 看看她最近对什么感兴趣\n"
+    "/提案 或 /pp — 查看她收集的功能提案（GitHub 调研归档）\n"
+    "/清理 或 /gc — 立刻清理过期的下载缓存\n"
     "/帮助 或 /help — 显示这份帮助"
 )
 
@@ -94,6 +102,24 @@ async def dispatch(bot, session: Session, room_id: str, sender: str, text: str) 
     elif action == "list_characters":
         names = "、".join(c["name"] for c in bot.char_mgr.list_characters())
         reply = f"当前可用角色：{names or '（暂无）'}"
+    elif action == "reflect":
+        ok = await asyncio.get_event_loop().run_in_executor(
+            None, evolution.reflect, bot.router, sender, session.character_name
+        )
+        reply = "反思完啦，成长档案已经更新～" if ok else "最近聊得还不够多，等我们多聊聊再反思吧。"
+    elif action == "interests":
+        interests = evolution.load_interests(sender, session.character_name)
+        if interests:
+            lines = "\n".join(f"· {i['topic']}（{i['weight']:.0%}）" for i in interests[:8])
+            reply = f"我最近感兴趣的：\n{lines}"
+        else:
+            reply = "还没形成明确的兴趣呢，多和我聊聊你喜欢的东西吧～"
+    elif action == "proposals":
+        text = evolution.read_proposals(sender, session.character_name)
+        reply = ("最近收集的提案（最新在后）：\n" + text[-1500:]) if text.strip() else "还没收集到提案。让我去搜搜 GitHub 看看有什么好玩的项目？"
+    elif action == "cleanup":
+        removed = tools.cleanup_downloads(0)  # 0 = 全部临时下载立即清
+        reply = f"清理完成，删掉了 {removed} 个缓存文件。"
     elif action == "help":
         reply = HELP_TEXT
 
